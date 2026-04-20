@@ -232,3 +232,101 @@ fn no_public_raw_field_accepts_allow_comment() {
     let hits = NoPublicRawField.check(&ctx_with(src));
     assert!(hits.is_empty(), "lint:allow must silence no-public-raw-field");
 }
+
+// ---- multi-file coverage (LintContext.all_sources) ----------------------
+//
+// Previously every per-crate lint scanned only src/lib.rs. These tests
+// exercise drift living in a module file (src/bits.rs), which old lint
+// scopes missed silently.
+
+fn ctx_with_files(files: Vec<(&'static str, &'static str)>) -> LintContext<'static> {
+    let lib_source = files
+        .iter()
+        .find(|(p, _)| *p == "src/lib.rs")
+        .map(|(_, t)| *t)
+        .unwrap_or("");
+
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_rust::LANGUAGE.into())
+        .unwrap();
+    let tree = parser.parse(lib_source, None).unwrap();
+    let tree: &'static tree_sitter::Tree = Box::leak(Box::new(tree));
+
+    let all_sources: &'static [CrateSourceFile] = Box::leak(Box::new(
+        files
+            .into_iter()
+            .map(|(path, text)| CrateSourceFile {
+                rel_path: std::path::PathBuf::from(path),
+                text: text.to_string(),
+            })
+            .collect::<Vec<_>>(),
+    ));
+
+    LintContext {
+        crate_name: "test-crate",
+        short_name: "test-crate",
+        source: lib_source,
+        tree,
+        all_sources,
+        deps: &[],
+        all_crates: Box::leak(Box::new(BTreeSet::new())),
+        design_doc: None,
+        all_doc_content: "",
+        shame_doc: None,
+        workspace_root: std::path::Path::new("/tmp"),
+        proc_macro_crates: &[],
+        crate_prefix: "test",
+    }
+}
+
+#[test]
+fn arvo_types_only_fires_in_module_file_not_lib_rs() {
+    let ctx = ctx_with_files(vec![
+        ("src/lib.rs", "pub mod bits;\n"),
+        ("src/bits.rs", "pub struct Bits(u64);\n"),
+    ]);
+    let hits = ArvoTypesOnly.check(&ctx);
+    assert!(!hits.is_empty(), "drift in src/bits.rs must be flagged");
+    assert!(
+        hits.iter().any(|e| e.message.contains("src/bits.rs")),
+        "error message should name the offending file"
+    );
+}
+
+#[test]
+fn no_bare_option_fires_in_module_file_not_lib_rs() {
+    let ctx = ctx_with_files(vec![
+        ("src/lib.rs", "pub mod resolve;\n"),
+        (
+            "src/resolve.rs",
+            "fn lookup() -> Option<u8> { None }\n",
+        ),
+    ]);
+    let hits = NoBareOption.check(&ctx);
+    assert!(!hits.is_empty(), "Option in src/resolve.rs must be flagged");
+    assert!(
+        hits.iter().any(|e| e.message.contains("src/resolve.rs")),
+        "error message should name the offending file"
+    );
+}
+
+#[test]
+fn no_public_raw_field_fires_in_module_file_not_lib_rs() {
+    let ctx = ctx_with_files(vec![
+        ("src/lib.rs", "pub mod handle;\n"),
+        (
+            "src/handle.rs",
+            "pub struct Str(pub u32);\n",
+        ),
+    ]);
+    let hits = NoPublicRawField.check(&ctx);
+    assert!(
+        !hits.is_empty(),
+        "tuple-struct raw u32 in src/handle.rs must be flagged"
+    );
+    assert!(
+        hits.iter().any(|e| e.message.contains("src/handle.rs")),
+        "error message should name the offending file"
+    );
+}
