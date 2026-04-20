@@ -32,6 +32,7 @@ pub mod lints {
     pub mod trait_first_signatures;
     pub mod arvo_types_only;
     pub mod lint_allow_requires_task_id;
+    pub mod writing_style;
 }
 
 use lints::{
@@ -41,7 +42,7 @@ use lints::{
     no_public_raw_field::NoPublicRawField, no_runtime_registration::NoRuntimeRegistration,
     no_runtime_spawn::NoRuntimeSpawn, no_std::NoStd, no_vec_in_trait_sig::NoVecInTraitSig,
     semantic_alias_nudge::SemanticAliasNudge, strategy_marker_required::StrategyMarkerRequired,
-    trait_first_signatures::TraitFirstSignatures,
+    trait_first_signatures::TraitFirstSignatures, writing_style::WritingStyle,
 };
 
 mockspace_lint_rules::lint_pack! {
@@ -62,5 +63,8 @@ mockspace_lint_rules::lint_pack! {
         TraitFirstSignatures,
         ArvoTypesOnly,
         LintAllowRequiresTaskId,
+    ],
+    cross_lints: [
+        WritingStyle,
     ],
 }
