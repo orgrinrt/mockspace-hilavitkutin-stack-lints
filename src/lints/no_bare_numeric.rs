@@ -33,26 +33,38 @@ impl Lint for NoBareNumeric {
         if ctx.is_proc_macro_crate() { return Vec::new(); }
         let mut out = Vec::new();
 
-        for (idx, raw_line) in ctx.source.lines().enumerate() {
-            let trimmed = raw_line.trim_start();
-            if trimmed.starts_with("//") { continue; }
-            if raw_line.contains("lint:allow(no-bare-numeric)") { continue; }
+        let sources: Vec<(String, &str)> = if ctx.all_sources.is_empty() {
+            vec![("src/lib.rs".to_string(), ctx.source)]
+        } else {
+            ctx.all_sources
+                .iter()
+                .map(|f| (f.rel_path.display().to_string(), f.text.as_str()))
+                .collect()
+        };
 
-            let scan = strip_strings_and_chars(raw_line);
-            let scan = strip_line_comment(&scan);
+        for (rel_path, source) in sources {
+            for (idx, raw_line) in source.lines().enumerate() {
+                let trimmed = raw_line.trim_start();
+                if trimmed.starts_with("//") { continue; }
+                if raw_line.contains("lint:allow(no-bare-numeric)") { continue; }
 
-            for prim in BARE_NUMERICS {
-                if contains_bare_word(&scan, prim) {
-                    out.push(err(
-                        ctx,
-                        idx + 1,
-                        "no-bare-numeric",
-                        format!(
-                            "bare `{prim}` at line {} — arvo is the exclusive numeric substrate. Wrap in UFixed / IFixed / FastFloat / StrictFloat / USize / Cap / Bool or a domain alias; bare primitives do not exist in this stack",
+                let scan = strip_strings_and_chars(raw_line);
+                let scan = strip_line_comment(&scan);
+
+                for prim in BARE_NUMERICS {
+                    if contains_bare_word(&scan, prim) {
+                        out.push(err(
+                            ctx,
                             idx + 1,
-                        ),
-                    ));
-                    break;
+                            "no-bare-numeric",
+                            format!(
+                                "bare `{prim}` in {} line {} — arvo is the exclusive numeric substrate. Wrap in UFixed / IFixed / FastFloat / StrictFloat / USize / Cap / Bool or a domain alias; bare primitives do not exist in this stack",
+                                rel_path,
+                                idx + 1,
+                            ),
+                        ));
+                        break;
+                    }
                 }
             }
         }

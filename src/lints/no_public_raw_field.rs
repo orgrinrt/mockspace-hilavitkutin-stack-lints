@@ -11,7 +11,7 @@
 //! restricted to public fields.
 
 use mockspace_lint_rules::{Lint, LintContext, LintError, Severity};
-use tree_sitter::Node;
+use tree_sitter::{Node, Parser, Tree};
 
 use crate::util::{err, for_each_struct, txt};
 
@@ -35,51 +35,97 @@ impl Lint for NoPublicRawField {
     fn check(&self, ctx: &LintContext) -> Vec<LintError> {
         if ctx.is_proc_macro_crate() { return Vec::new(); }
         let mut out = Vec::new();
-        for_each_struct(ctx.tree.root_node(), |node| {
-            check_struct(node, ctx, &mut out);
-        });
+
+        // Scan every src/*.rs file, not just lib.rs. Parse each file
+        // with its own tree-sitter tree so node positions and text
+        // line up with that file's contents.
+        if ctx.all_sources.is_empty() {
+            // Back-compat: older mockspace versions carry only
+            // ctx.source/ctx.tree for lib.rs.
+            for_each_struct(ctx.tree.root_node(), |node| {
+                check_struct(node, ctx.source, "src/lib.rs", &mut out, ctx);
+            });
+            return out;
+        }
+
+        let mut parser = Parser::new();
+        if parser
+            .set_language(&tree_sitter_rust::LANGUAGE.into())
+            .is_err()
+        {
+            return out;
+        }
+
+        for file in ctx.all_sources {
+            let tree: Tree = match parser.parse(&file.text, None) {
+                Some(t) => t,
+                None => continue,
+            };
+            let rel_path = file.rel_path.display().to_string();
+            for_each_struct(tree.root_node(), |node| {
+                check_struct(node, &file.text, &rel_path, &mut out, ctx);
+            });
+        }
+
         out
     }
 }
 
-fn check_struct(node: Node, ctx: &LintContext, out: &mut Vec<LintError>) {
+fn check_struct(
+    node: Node,
+    source: &str,
+    rel_path: &str,
+    out: &mut Vec<LintError>,
+    ctx: &LintContext,
+) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         match child.kind() {
-            "field_declaration_list" => scan_named_body(child, ctx, out),
-            "ordered_field_declaration_list" => scan_tuple_body(child, ctx, out),
+            "field_declaration_list" => scan_named_body(child, source, rel_path, out, ctx),
+            "ordered_field_declaration_list" => scan_tuple_body(child, source, rel_path, out, ctx),
             _ => {}
         }
     }
 }
 
-fn scan_named_body(node: Node, ctx: &LintContext, out: &mut Vec<LintError>) {
+fn scan_named_body(
+    node: Node,
+    source: &str,
+    rel_path: &str,
+    out: &mut Vec<LintError>,
+    ctx: &LintContext,
+) {
     let mut cursor = node.walk();
     for field in node.children(&mut cursor) {
         if field.kind() != "field_declaration" { continue; }
 
         let line = field.start_position().row + 1;
-        let src_line = ctx
-            .source
+        let src_line = source
             .lines()
             .nth(field.start_position().row)
             .unwrap_or("");
         if src_line.contains("lint:allow(no-public-raw-field)") { continue; }
 
         let type_text = match field.child_by_field_name("type") {
-            Some(t) => txt(t, ctx.source).trim().to_string(),
+            Some(t) => txt(t, source).trim().to_string(),
             None => continue,
         };
         let field_name = field
             .child_by_field_name("name")
-            .map(|n| txt(n, ctx.source).to_string())
+            .map(|n| txt(n, source).to_string())
             .unwrap_or_else(|| "<anon>".to_string());
 
-        report_if_forbidden(ctx, out, line, &field_name, &type_text);
+        report_if_forbidden(ctx, out, rel_path, line, &field_name, &type_text);
     }
 }
 
-fn scan_tuple_body(node: Node, ctx: &LintContext, out: &mut Vec<LintError>) {
+fn scan_tuple_body(
+    node: Node,
+    source: &str,
+    rel_path: &str,
+    out: &mut Vec<LintError>,
+    ctx: &LintContext,
+) {
     let mut cursor = node.walk();
     for field in node.children(&mut cursor) {
         // Inside an ordered_field_declaration_list, tree-sitter
@@ -93,22 +139,22 @@ fn scan_tuple_body(node: Node, ctx: &LintContext, out: &mut Vec<LintError>) {
         }
 
         let line = field.start_position().row + 1;
-        let src_line = ctx
-            .source
+        let src_line = source
             .lines()
             .nth(field.start_position().row)
             .unwrap_or("");
         if src_line.contains("lint:allow(no-public-raw-field)") { continue; }
 
-        let type_text = txt(field, ctx.source).trim().to_string();
+        let type_text = txt(field, source).trim().to_string();
         if type_text.is_empty() { continue; }
-        report_if_forbidden(ctx, out, line, "<tuple>", &type_text);
+        report_if_forbidden(ctx, out, rel_path, line, "<tuple>", &type_text);
     }
 }
 
 fn report_if_forbidden(
     ctx: &LintContext,
     out: &mut Vec<LintError>,
+    rel_path: &str,
     line: usize,
     field_name: &str,
     type_text: &str,
@@ -120,7 +166,7 @@ fn report_if_forbidden(
                 line,
                 "no-public-raw-field",
                 format!(
-                    "field `{field_name}: {type_text}` uses raw `{forbidden}` — wrap in a domain newtype or arvo primitive. Bare primitives do not exist in this stack (pub or private field, no exception)"
+                    "field `{field_name}: {type_text}` in {rel_path} uses raw `{forbidden}` — wrap in a domain newtype or arvo primitive. Bare primitives do not exist in this stack (pub or private field, no exception)"
                 ),
             ));
             return;

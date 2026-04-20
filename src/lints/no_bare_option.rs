@@ -26,24 +26,36 @@ impl Lint for NoBareOption {
         if ctx.is_proc_macro_crate() { return Vec::new(); }
         let mut out = Vec::new();
 
-        for (idx, raw_line) in ctx.source.lines().enumerate() {
-            let trimmed = raw_line.trim_start();
-            if trimmed.starts_with("//") { continue; }
-            if raw_line.contains("lint:allow(no-bare-option)") { continue; }
+        let sources: Vec<(String, &str)> = if ctx.all_sources.is_empty() {
+            vec![("src/lib.rs".to_string(), ctx.source)]
+        } else {
+            ctx.all_sources
+                .iter()
+                .map(|f| (f.rel_path.display().to_string(), f.text.as_str()))
+                .collect()
+        };
 
-            let scan = strip_strings_and_chars(raw_line);
-            let scan = strip_line_comment(&scan);
+        for (rel_path, source) in sources {
+            for (idx, raw_line) in source.lines().enumerate() {
+                let trimmed = raw_line.trim_start();
+                if trimmed.starts_with("//") { continue; }
+                if raw_line.contains("lint:allow(no-bare-option)") { continue; }
 
-            if contains_option_token(&scan) {
-                out.push(err(
-                    ctx,
-                    idx + 1,
-                    "no-bare-option",
-                    format!(
-                        "bare `Option` at line {} — use notko::Maybe<T>. Option does not exist in this stack",
+                let scan = strip_strings_and_chars(raw_line);
+                let scan = strip_line_comment(&scan);
+
+                if contains_option_token(&scan) {
+                    out.push(err(
+                        ctx,
                         idx + 1,
-                    ),
-                ));
+                        "no-bare-option",
+                        format!(
+                            "bare `Option` in {} line {} — use notko::Maybe<T>. Option does not exist in this stack",
+                            rel_path,
+                            idx + 1,
+                        ),
+                    ));
+                }
             }
         }
 
