@@ -441,6 +441,27 @@ fn no_bare_option_fires_on_non_fallibility_crate() {
 }
 
 #[test]
+fn no_public_raw_field_numeric_introducer_still_flags_string_fields() {
+    // Numeric introducer gets numeric field types exempted, but a
+    // bare `String` field still fires — the crate doesn't introduce
+    // the string substrate.
+    let ctx = ctx_with_crate_and_introductions(
+        "arvo",
+        vec![("arvo", vec!["numeric"])],
+        "pub struct Msg { body: String }\n",
+    );
+    let hits = NoPublicRawField.check(&ctx);
+    assert!(
+        !hits.is_empty(),
+        "`String` field in numeric-only crate must still fire"
+    );
+    assert!(
+        hits.iter().any(|e| e.message.contains("`String`")),
+        "error should name the String type"
+    );
+}
+
+#[test]
 fn no_public_raw_field_skips_numeric_introducer() {
     // arvo-bits introduces the numeric substrate at L1 (opaque-bit
     // containers). Its u64 field in Bits<N>(u64) is legitimate.

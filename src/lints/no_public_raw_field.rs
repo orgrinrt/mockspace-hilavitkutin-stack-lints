@@ -13,16 +13,31 @@
 use mockspace_lint_rules::{Lint, LintContext, LintError, Severity};
 use tree_sitter::{Node, Parser, Tree};
 
-use crate::util::{categories, crate_introduces_any_category, err, for_each_struct, txt};
+use crate::util::{categories, crate_introduces_category, err, for_each_struct, txt};
 
-const FORBIDDEN_FIELD_TYPES: &[&str] = &[
-    "u8", "u16", "u32", "u64", "u128",
-    "i8", "i16", "i32", "i64", "i128",
-    "f32", "f64",
-    "usize", "isize",
-    "bool",
-    "String",
-    "&str",
+/// Forbidden field types paired with the substrate category each
+/// falls under. When a crate is tagged as introducing a category,
+/// the check skips forbidden types in that category but continues
+/// scanning types in other categories — a `["numeric"]`-tagged
+/// crate still gets its `String` fields flagged.
+const FORBIDDEN_FIELD_TYPES: &[(&str, &str)] = &[
+    ("u8",    categories::NUMERIC),
+    ("u16",   categories::NUMERIC),
+    ("u32",   categories::NUMERIC),
+    ("u64",   categories::NUMERIC),
+    ("u128",  categories::NUMERIC),
+    ("i8",    categories::NUMERIC),
+    ("i16",   categories::NUMERIC),
+    ("i32",   categories::NUMERIC),
+    ("i64",   categories::NUMERIC),
+    ("i128",  categories::NUMERIC),
+    ("f32",   categories::NUMERIC),
+    ("f64",   categories::NUMERIC),
+    ("usize", categories::NUMERIC),
+    ("isize", categories::NUMERIC),
+    ("bool",  categories::NUMERIC),
+    ("String", categories::STRING),
+    ("&str",   categories::STRING),
 ];
 
 pub struct NoPublicRawField;
@@ -34,14 +49,9 @@ impl Lint for NoPublicRawField {
 
     fn check(&self, ctx: &LintContext) -> Vec<LintError> {
         if ctx.is_proc_macro_crate() { return Vec::new(); }
-        // no-public-raw-field enforces numeric + string field types;
-        // skip for any crate that introduces either substrate.
-        if crate_introduces_any_category(
-            ctx,
-            &[categories::NUMERIC, categories::STRING],
-        ) {
-            return Vec::new();
-        }
+        // Per-category skip happens inside `report_if_forbidden`: a
+        // `["numeric"]` crate skips numeric field types but still gets
+        // `String` / `&str` field drift flagged.
         let mut out = Vec::new();
 
         // Scan every src/*.rs file, not just lib.rs. Parse each file
@@ -167,8 +177,12 @@ fn report_if_forbidden(
     field_name: &str,
     type_text: &str,
 ) {
-    for forbidden in FORBIDDEN_FIELD_TYPES {
+    for (forbidden, category) in FORBIDDEN_FIELD_TYPES {
         if type_is(type_text, forbidden) {
+            // Skip this specific field type when the crate introduces
+            // its category; keep scanning so an unrelated-category
+            // type later in the list still fires.
+            if crate_introduces_category(ctx, category) { return; }
             out.push(err(
                 ctx,
                 line,
