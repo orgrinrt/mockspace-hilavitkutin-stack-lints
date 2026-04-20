@@ -13,7 +13,7 @@
 use mockspace_lint_rules::{Lint, LintContext, LintError, Severity};
 use tree_sitter::{Node, Parser, Tree};
 
-use crate::util::{err, for_each_struct, txt};
+use crate::util::{categories, crate_introduces_any_category, err, for_each_struct, txt};
 
 const FORBIDDEN_FIELD_TYPES: &[&str] = &[
     "u8", "u16", "u32", "u64", "u128",
@@ -34,6 +34,14 @@ impl Lint for NoPublicRawField {
 
     fn check(&self, ctx: &LintContext) -> Vec<LintError> {
         if ctx.is_proc_macro_crate() { return Vec::new(); }
+        // no-public-raw-field enforces numeric + string field types;
+        // skip for any crate that introduces either substrate.
+        if crate_introduces_any_category(
+            ctx,
+            &[categories::NUMERIC, categories::STRING],
+        ) {
+            return Vec::new();
+        }
         let mut out = Vec::new();
 
         // Scan every src/*.rs file, not just lib.rs. Parse each file
@@ -151,13 +159,6 @@ fn scan_tuple_body(
     }
 }
 
-fn matches_introduced(ctx: &LintContext, forbidden: &str, type_text: &str) -> bool {
-    // Only skip when the crate explicitly introduces this specific
-    // forbidden token AND the field's type resolves to it.
-    if !ctx.introduces(forbidden) { return false; }
-    type_is(type_text, forbidden)
-}
-
 fn report_if_forbidden(
     ctx: &LintContext,
     out: &mut Vec<LintError>,
@@ -168,7 +169,6 @@ fn report_if_forbidden(
 ) {
     for forbidden in FORBIDDEN_FIELD_TYPES {
         if type_is(type_text, forbidden) {
-            if matches_introduced(ctx, forbidden, type_text) { return; }
             out.push(err(
                 ctx,
                 line,

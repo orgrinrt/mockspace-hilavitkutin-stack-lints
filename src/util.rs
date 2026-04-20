@@ -3,6 +3,65 @@
 use mockspace_lint_rules::{LintContext, LintError, Severity};
 use tree_sitter::Node;
 
+/// Primitive-substrate categories that the ecosystem's types group
+/// into. Each lint in this pack declares which category (or
+/// categories) of substrate it protects via the `Lint::categories`
+/// helper; the `[primitive-introductions]` section in a consumer's
+/// mockspace.toml lists the categories that each crate introduces.
+/// When the two intersect, the lint self-exempts for that crate —
+/// the crate is the one bringing the substrate to the table, so
+/// whatever it does internally to define it is legitimate.
+///
+/// Categories (not specific arvo type names) keep the map stable as
+/// the stack evolves. Adding a new arvo type (e.g. a new strategy
+/// marker, a new arithmetic kind, a new opaque-bit container) just
+/// means tagging its introducing crate with the right category — no
+/// lint pack change, no recompile. Categories change only when a
+/// genuinely new substrate DOMAIN appears (rare; e.g. if a "temporal
+/// substrate" layer ever joined, a new lint would carry its own
+/// domain).
+///
+/// The current stable categories:
+///
+/// | Category      | What it covers                                              | Typical introducers |
+/// |---------------|-------------------------------------------------------------|---------------------|
+/// | `numeric`     | Numeric + bool wrappers (UFixed, USize, Bool, Bits, …)      | arvo, arvo-bits, arvo-hash |
+/// | `fallibility` | Hot/warm/cold fallibility tier (Maybe, Outcome, Just)       | notko |
+/// | `string`      | Interned / static string identity (Str)                     | hilavitkutin-str |
+///
+/// Future direction (task #119): auto-derive the categories a crate
+/// introduces from its DESIGN.md.tmpl / source parse, eliminating the
+/// manual TOML declaration entirely.
+pub mod categories {
+    pub const NUMERIC: &str = "numeric";
+    pub const FALLIBILITY: &str = "fallibility";
+    pub const STRING: &str = "string";
+}
+
+/// Whether the current crate is declared (via
+/// `[primitive-introductions]`) to introduce the substrate `category`.
+/// Bare-primitive lints call this once at the top of `check`: if the
+/// crate introduces the category the lint enforces, the lint returns
+/// an empty violation set for that crate, unconditionally.
+///
+/// Matching is exact string compare against the crate's list. Adding
+/// an unknown category to a crate's list has no effect — no lint
+/// watches that category. Adding `"numeric"` or `"fallibility"` to a
+/// crate's list is an auditable architectural claim (the crate must
+/// actually define the substrate types) rather than a list of
+/// forbidden tokens to bypass.
+pub fn crate_introduces_category(ctx: &LintContext, category: &str) -> bool {
+    ctx.primitive_introductions
+        .get(ctx.crate_name)
+        .map(|list| list.iter().any(|c| c == category))
+        .unwrap_or(false)
+}
+
+/// Whether the current crate introduces ANY of `categories`.
+pub fn crate_introduces_any_category(ctx: &LintContext, categories: &[&str]) -> bool {
+    categories.iter().any(|c| crate_introduces_category(ctx, c))
+}
+
 /// Slice of source for a node.
 pub fn txt<'a>(node: Node<'a>, src: &'a str) -> &'a str {
     &src[node.byte_range()]

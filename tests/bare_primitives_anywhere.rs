@@ -360,82 +360,99 @@ fn ctx_with_crate_and_introductions(
 }
 
 #[test]
-fn arvo_types_only_skips_introduced_primitive() {
-    // arvo is configured to introduce `usize`, so the lint skips
-    // that token for the arvo crate.
+fn arvo_types_only_skips_numeric_introducer() {
+    // arvo is tagged as introducing the numeric substrate; the lint
+    // self-exempts for this crate regardless of internal impl.
     let ctx = ctx_with_crate_and_introductions(
         "arvo",
-        vec![("arvo", vec!["usize"])],
+        vec![("arvo", vec!["numeric"])],
         "pub struct USize(pub usize);\n",
     );
     let hits = ArvoTypesOnly.check(&ctx);
     assert!(
         hits.is_empty(),
-        "arvo introduces usize; lint must skip it on arvo"
-    );
-}
-
-#[test]
-fn arvo_types_only_fires_on_non_introduced_primitive() {
-    // arvo is configured to introduce only `usize`; a bare `u64`
-    // elsewhere in arvo is still drift.
-    let ctx = ctx_with_crate_and_introductions(
-        "arvo",
-        vec![("arvo", vec!["usize"])],
-        "pub fn width() -> u64 { 0 }\n",
-    );
-    let hits = ArvoTypesOnly.check(&ctx);
-    assert!(
-        !hits.is_empty(),
-        "arvo does not introduce u64; lint must still fire"
+        "arvo introduces numeric; lint must skip entirely on arvo"
     );
 }
 
 #[test]
 fn arvo_types_only_fires_on_non_introducer_crate() {
-    // hilavitkutin does NOT introduce any primitive; bare usize
-    // in its source is drift.
+    // hilavitkutin is NOT an introducer of the numeric substrate.
+    // Even though arvo is configured, hilavitkutin's bare usize is drift.
     let ctx = ctx_with_crate_and_introductions(
         "hilavitkutin",
-        vec![("arvo", vec!["usize"])],
+        vec![("arvo", vec!["numeric"])],
         "pub struct Counter(pub usize);\n",
     );
     let hits = ArvoTypesOnly.check(&ctx);
     assert!(
         !hits.is_empty(),
-        "hilavitkutin doesn't introduce usize; lint must fire"
+        "hilavitkutin doesn't introduce numeric; lint must fire"
     );
 }
 
 #[test]
-fn no_bare_option_skips_when_crate_introduces_option() {
-    // Hypothetical: notko could be configured to "introduce"
-    // Option; lint skips.
+fn arvo_types_only_ignores_unknown_category() {
+    // Adding a string that isn't a known category (e.g. a raw std
+    // primitive name) has no effect — the lint only matches known
+    // categories. This is the anti-bypass property: you can't just
+    // add "u32" to your list to silence the lint.
+    let ctx = ctx_with_crate_and_introductions(
+        "arvo",
+        vec![("arvo", vec!["u32", "Option", "String"])],
+        "pub fn width() -> u32 { 0 }\n",
+    );
+    let hits = ArvoTypesOnly.check(&ctx);
+    assert!(
+        !hits.is_empty(),
+        "unknown tokens in introductions list must not bypass the lint"
+    );
+}
+
+#[test]
+fn no_bare_option_skips_fallibility_introducer() {
+    // notko is the fallibility substrate; bare Option in its source
+    // is acknowledged as part of defining Maybe.
     let ctx = ctx_with_crate_and_introductions(
         "notko",
-        vec![("notko", vec!["Option"])],
-        "fn iter() -> Option<u8> { None } // lint:allow(no-bare-numeric) reason: tracked: #99\n",
+        vec![("notko", vec!["fallibility"])],
+        "impl<T> From<Option<T>> for Maybe<T> { fn from(_: Option<T>) -> Self { Self::Isnt } }\n",
     );
     let hits = NoBareOption.check(&ctx);
     assert!(
         hits.is_empty(),
-        "notko introduces Option; no-bare-option must skip"
+        "notko introduces fallibility; no-bare-option must skip"
     );
 }
 
 #[test]
-fn no_public_raw_field_skips_when_crate_introduces_field_type() {
-    // arvo-bits introduces u64 for Bits<N>(u64) storage.
+fn no_bare_option_fires_on_non_fallibility_crate() {
+    // hilavitkutin consumes fallibility but doesn't introduce it.
+    let ctx = ctx_with_crate_and_introductions(
+        "hilavitkutin",
+        vec![("notko", vec!["fallibility"])],
+        "pub fn lookup() -> Option<u8> { None }\n",
+    );
+    let hits = NoBareOption.check(&ctx);
+    assert!(
+        !hits.is_empty(),
+        "hilavitkutin doesn't introduce fallibility; no-bare-option must fire"
+    );
+}
+
+#[test]
+fn no_public_raw_field_skips_numeric_introducer() {
+    // arvo-bits introduces the numeric substrate at L1 (opaque-bit
+    // containers). Its u64 field in Bits<N>(u64) is legitimate.
     let ctx = ctx_with_crate_and_introductions(
         "arvo-bits",
-        vec![("arvo-bits", vec!["u64"])],
+        vec![("arvo-bits", vec!["numeric"])],
         "pub struct Bits<const N: u8>(u64);\n",
     );
     let hits = NoPublicRawField.check(&ctx);
-    let u64_hits: Vec<_> = hits.iter().filter(|e| e.message.contains("`u64`")).collect();
     assert!(
-        u64_hits.is_empty(),
-        "arvo-bits introduces u64; no-public-raw-field must skip it on arvo-bits"
+        hits.is_empty(),
+        "arvo-bits introduces numeric; no-public-raw-field must skip"
     );
 }
 

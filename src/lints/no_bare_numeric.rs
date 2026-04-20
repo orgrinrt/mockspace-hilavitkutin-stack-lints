@@ -12,7 +12,7 @@
 
 use mockspace_lint_rules::{Lint, LintContext, LintError, Severity};
 
-use crate::util::err;
+use crate::util::{categories, crate_introduces_category, err};
 
 const BARE_NUMERICS: &[&str] = &[
     "u8", "u16", "u32", "u64", "u128",
@@ -31,6 +31,7 @@ impl Lint for NoBareNumeric {
 
     fn check(&self, ctx: &LintContext) -> Vec<LintError> {
         if ctx.is_proc_macro_crate() { return Vec::new(); }
+        if crate_introduces_category(ctx, categories::NUMERIC) { return Vec::new(); }
         let mut out = Vec::new();
 
         let sources: Vec<(String, &str)> = if ctx.all_sources.is_empty() {
@@ -52,7 +53,6 @@ impl Lint for NoBareNumeric {
                 let scan = strip_line_comment(&scan);
 
                 for prim in BARE_NUMERICS {
-                    if ctx.introduces(prim) { continue; }
                     if contains_bare_word(&scan, prim) {
                         out.push(err(
                             ctx,
