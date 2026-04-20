@@ -11,7 +11,7 @@
 
 use mockspace_lint_rules::{Lint, LintContext, LintError, Severity};
 
-use crate::util::err;
+use crate::util::{categories, crate_introduces_category, err};
 
 pub struct NoBareString;
 
@@ -33,9 +33,9 @@ impl Lint for NoBareString {
                 .collect()
         };
 
-        let check_string = !ctx.introduces("String");
-        let check_str = !ctx.introduces("&str");
-        if !check_string && !check_str { return Vec::new(); }
+        if crate_introduces_category(ctx, categories::STRING) { return Vec::new(); }
+        let check_string = true;
+        let check_str = true;
         for (rel_path, source) in sources {
             for (idx, raw_line) in source.lines().enumerate() {
                 let trimmed = raw_line.trim_start();

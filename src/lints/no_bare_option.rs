@@ -13,7 +13,7 @@
 
 use mockspace_lint_rules::{Lint, LintContext, LintError, Severity};
 
-use crate::util::err;
+use crate::util::{categories, crate_introduces_category, err};
 
 pub struct NoBareOption;
 
@@ -35,7 +35,7 @@ impl Lint for NoBareOption {
                 .collect()
         };
 
-        if ctx.introduces("Option") { return Vec::new(); }
+        if crate_introduces_category(ctx, categories::FALLIBILITY) { return Vec::new(); }
         for (rel_path, source) in sources {
             for (idx, raw_line) in source.lines().enumerate() {
                 let trimmed = raw_line.trim_start();
