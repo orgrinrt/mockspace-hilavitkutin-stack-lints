@@ -88,11 +88,19 @@ impl CrossCrateLint for WritingStyle {
 }
 
 fn check_file(path: &Path, crate_name: &str, _lint: &str, out: &mut Vec<LintError>) {
+    if is_self_exempt(path) { return; }
     let content = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(_) => return,
     };
     check_text(&content, crate_name, out);
+}
+
+/// The writing-style rule template itself legitimately quotes banned words
+/// and em-dashes as examples. Skip it to avoid self-tripping.
+fn is_self_exempt(path: &Path) -> bool {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    name.contains("writing-style") || name.contains("writing_style")
 }
 
 fn walk_md_tmpl(dir: &Path, crate_name: &str, out: &mut Vec<LintError>) {
@@ -116,8 +124,12 @@ fn check_text(content: &str, crate_name: &str, out: &mut Vec<LintError>) {
     let lines: Vec<&str> = content.lines().collect();
     let total_lines = lines.len().max(1);
 
+    // Strip code fences and inline code spans for prose-level checks.
+    // Raw content is retained for structural checks (leading lists, tables).
+    let prose = strip_code_spans(content);
+
     // 1. Em-dash density.
-    let em_dash_count = content.matches('—').count();
+    let em_dash_count = prose.matches('—').count();
     let threshold = total_lines / EM_DASH_PER_LINES;
     if em_dash_count > threshold && em_dash_count > 1 {
         out.push(LintError::with_severity(
@@ -130,7 +142,7 @@ fn check_text(content: &str, crate_name: &str, out: &mut Vec<LintError>) {
     }
 
     // 2. Hype words, corporate jargon, filler phrases, greeting openers.
-    let lower = content.to_lowercase();
+    let lower = prose.to_lowercase();
     for (word, category) in HYPE_WORDS.iter().map(|w| (*w, "hype"))
         .chain(CORPORATE_JARGON.iter().map(|w| (*w, "jargon")))
         .chain(FILLER_PHRASES.iter().map(|w| (*w, "filler")))
@@ -148,7 +160,7 @@ fn check_text(content: &str, crate_name: &str, out: &mut Vec<LintError>) {
         }
     }
     for opener in GREETING_OPENERS {
-        if content.contains(opener) {
+        if prose.contains(opener) {
             let line = line_of_first_match(&lines, opener);
             out.push(LintError::with_severity(
                 crate_name.to_string(),
@@ -204,6 +216,35 @@ fn line_of_first_match(lines: &[&str], needle: &str) -> usize {
         }
     }
     1
+}
+
+/// Strip fenced code blocks and inline code spans from a markdown body.
+/// Used for prose-level checks so code examples and quoted tokens don't
+/// trip the heuristics.
+fn strip_code_spans(content: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut in_fence = false;
+    for line in content.lines() {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            out.push('\n');
+            continue;
+        }
+        if in_fence {
+            out.push('\n');
+            continue;
+        }
+        let mut in_code = false;
+        for ch in line.chars() {
+            match ch {
+                '`' => in_code = !in_code,
+                _ if in_code => out.push(' '),
+                c => out.push(c),
+            }
+        }
+        out.push('\n');
+    }
+    out
 }
 
 fn count_exclamations_in_prose(content: &str) -> usize {
