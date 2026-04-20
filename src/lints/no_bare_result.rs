@@ -35,6 +35,7 @@ impl Lint for NoBareResult {
                 .collect()
         };
 
+        if ctx.introduces("Result") { return Vec::new(); }
         for (rel_path, source) in sources {
             for (idx, raw_line) in source.lines().enumerate() {
                 let trimmed = raw_line.trim_start();
