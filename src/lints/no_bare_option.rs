@@ -1,12 +1,19 @@
-//! Lint: no bare `Option<T>` in public API positions. Use `notko::Maybe<T>`.
+//! Lint: no bare `Option<T>` anywhere in source. Use `notko::Maybe<T>`.
 //!
-//! Allowed: std trait-method impls where the signature is fixed by the trait
-//! (`fn next(&mut self) -> Option<Self::Item>`, etc.).
+//! Scans every non-comment, non-string line. Any appearance of the
+//! `Option` type name (word boundary, followed by `<` or used as the
+//! standalone type) is drift, regardless of context: pub API, private
+//! impl, let bindings, struct fields, match arms with
+//! `Option::Some(...)`, etc. The only form that passes silently is
+//! an explicit `lint:allow(no-bare-option)` on the offending line.
+//!
+//! Allowed via line-local exemption when implementing a std trait
+//! method whose signature is fixed externally
+//! (`fn next(&mut self) -> Option<Self::Item>`).
 
 use mockspace_lint_rules::{Lint, LintContext, LintError, Severity};
-use tree_sitter::Node;
 
-use crate::util::{err, for_each_fn, has_attribute, inside_macro_def, is_public, txt};
+use crate::util::err;
 
 pub struct NoBareOption;
 
@@ -16,71 +23,90 @@ impl Lint for NoBareOption {
     fn default_severity(&self) -> Severity { Severity::HARD_ERROR }
 
     fn check(&self, ctx: &LintContext) -> Vec<LintError> {
-        if ctx.is_proc_macro_crate() {
-            return Vec::new();
+        if ctx.is_proc_macro_crate() { return Vec::new(); }
+        let mut out = Vec::new();
+
+        for (idx, raw_line) in ctx.source.lines().enumerate() {
+            let trimmed = raw_line.trim_start();
+            if trimmed.starts_with("//") { continue; }
+            if raw_line.contains("lint:allow(no-bare-option)") { continue; }
+
+            let scan = strip_strings_and_chars(raw_line);
+            let scan = strip_line_comment(&scan);
+
+            if contains_option_token(&scan) {
+                out.push(err(
+                    ctx,
+                    idx + 1,
+                    "no-bare-option",
+                    format!(
+                        "bare `Option` at line {} — use notko::Maybe<T>. Option does not exist in this stack",
+                        idx + 1,
+                    ),
+                ));
+            }
         }
 
-        let mut out = Vec::new();
-        for_each_fn(ctx.tree.root_node(), |node| {
-            if !is_public(node, ctx.source) {
-                return;
-            }
-            if inside_macro_def(node) {
-                return;
-            }
-            if has_attribute(node, ctx.source, "optimize_for") {
-                return;
-            }
-            check_fn(node, ctx, &mut out);
-        });
         out
     }
 }
 
-fn check_fn(node: Node, ctx: &LintContext, out: &mut Vec<LintError>) {
-    let line = node.start_position().row + 1;
-    let name = node
-        .child_by_field_name("name")
-        .map(|n| txt(n, ctx.source))
-        .unwrap_or("<unknown>");
-
-    if let Some(ret) = node.child_by_field_name("return_type") {
-        let text = strip_return_arrow(txt(ret, ctx.source));
-        if starts_with_generic(text, "Option") {
-            if !on_line_allowed(ctx, node, "no-bare-option") {
-                out.push(err(
-                    ctx,
-                    line,
-                    "no-bare-option",
-                    format!("`{name}` returns `{text}` — use notko::Maybe<T> at public boundaries"),
-                ));
+/// True when `Option` appears as a type/path identifier. Excludes
+/// `std::option` path segments and `core::option` since those are
+/// module references rather than the generic type.
+fn contains_option_token(hay: &str) -> bool {
+    let bytes = hay.as_bytes();
+    let needle = b"Option";
+    let mut i = 0;
+    while i + needle.len() <= bytes.len() {
+        if &bytes[i..i + needle.len()] == needle {
+            let before_ok = i == 0 || !is_ident(bytes[i - 1]);
+            let after_pos = i + needle.len();
+            let after_ok = after_pos >= bytes.len() || !is_ident(bytes[after_pos]);
+            if before_ok && after_ok {
+                return true;
             }
         }
+        i += 1;
     }
+    false
+}
 
-    if let Some(params) = node.child_by_field_name("parameters") {
-        let text = txt(params, ctx.source);
-        if text.contains("Option<") && !on_line_allowed(ctx, node, "no-bare-option") {
-            out.push(err(
-                ctx,
-                line,
-                "no-bare-option",
-                format!("`{name}` parameters include `Option<T>` — use notko::Maybe<T>"),
-            ));
+fn is_ident(b: u8) -> bool { b.is_ascii_alphanumeric() || b == b'_' }
+
+fn strip_strings_and_chars(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'"' {
+            out.push('"');
+            i += 1;
+            while i < bytes.len() {
+                let c = bytes[i];
+                if c == b'\\' && i + 1 < bytes.len() { i += 2; continue; }
+                if c == b'"' { out.push('"'); i += 1; break; }
+                i += 1;
+            }
+        } else if b == b'\'' {
+            out.push('\'');
+            i += 1;
+            let start = i;
+            while i < bytes.len() {
+                let c = bytes[i];
+                if c == b'\\' && i + 1 < bytes.len() { i += 2; continue; }
+                if c == b'\'' && i != start { out.push('\''); i += 1; break; }
+                i += 1;
+            }
+        } else {
+            out.push(b as char);
+            i += 1;
         }
     }
+    out
 }
 
-fn strip_return_arrow(s: &str) -> &str {
-    s.trim().strip_prefix("->").unwrap_or(s.trim()).trim()
-}
-
-fn starts_with_generic(text: &str, ty: &str) -> bool {
-    text.starts_with(&format!("{ty}<")) || text == ty
-}
-
-fn on_line_allowed(ctx: &LintContext, node: Node, rule: &str) -> bool {
-    let row = node.start_position().row;
-    let line = ctx.source.lines().nth(row).unwrap_or("");
-    line.contains(&format!("lint:allow({rule})"))
+fn strip_line_comment(line: &str) -> String {
+    if let Some(idx) = line.find("//") { line[..idx].to_string() } else { line.to_string() }
 }
