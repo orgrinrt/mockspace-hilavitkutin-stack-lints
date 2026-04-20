@@ -8,38 +8,6 @@ pub fn txt<'a>(node: Node<'a>, src: &'a str) -> &'a str {
     &src[node.byte_range()]
 }
 
-/// Whether a node sits anywhere inside a `macro_definition` subtree.
-pub fn inside_macro_def(node: Node) -> bool {
-    let mut cur = node.parent();
-    while let Some(p) = cur {
-        if p.kind() == "macro_definition" {
-            return true;
-        }
-        cur = p.parent();
-    }
-    false
-}
-
-/// Whether a function or item carries a given attribute name (e.g. "optimize_for").
-///
-/// Attributes in tree-sitter are siblings preceding the item, not children.
-pub fn has_attribute(node: Node, src: &str, name: &str) -> bool {
-    let mut prev = node.prev_sibling();
-    while let Some(sib) = prev {
-        match sib.kind() {
-            "attribute_item" => {
-                if txt(sib, src).contains(name) {
-                    return true;
-                }
-            }
-            "line_comment" | "block_comment" => {}
-            _ => break,
-        }
-        prev = sib.prev_sibling();
-    }
-    false
-}
-
 /// Whether the line a node starts on contains `lint:allow(<name>)`.
 #[allow(dead_code)]
 pub fn is_lint_allowed(node: Node, ctx: &LintContext, rule_name: &str) -> bool {
