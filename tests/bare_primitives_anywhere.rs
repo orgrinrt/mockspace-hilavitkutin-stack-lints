@@ -15,7 +15,7 @@ use mockspace_hilavitkutin_stack_lints::lints::{
     no_bare_option::NoBareOption, no_bare_result::NoBareResult,
     no_bare_string::NoBareString, no_public_raw_field::NoPublicRawField,
 };
-use mockspace_lint_rules::{Lint, LintContext};
+use mockspace_lint_rules::{CrateSourceFile, Lint, LintContext};
 
 fn ctx_with(source: &'static str) -> LintContext<'static> {
     let mut parser = tree_sitter::Parser::new();
@@ -25,11 +25,19 @@ fn ctx_with(source: &'static str) -> LintContext<'static> {
     let tree = parser.parse(source, None).unwrap();
     let tree: &'static tree_sitter::Tree = Box::leak(Box::new(tree));
 
+    let all_sources: &'static [CrateSourceFile] = Box::leak(Box::new(vec![
+        CrateSourceFile {
+            rel_path: std::path::PathBuf::from("src/lib.rs"),
+            text: source.to_string(),
+        },
+    ]));
+
     LintContext {
         crate_name: "test-crate",
         short_name: "test-crate",
         source,
         tree,
+        all_sources,
         deps: &[],
         all_crates: Box::leak(Box::new(BTreeSet::new())),
         design_doc: None,

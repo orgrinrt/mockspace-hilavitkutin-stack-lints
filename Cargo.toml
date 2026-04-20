@@ -9,7 +9,7 @@ publish = false
 [dependencies]
 # Committed state points at the canonical mockspace repo. For local
 # iteration, use `[patch]` in `.cargo/config.toml` to redirect.
-mockspace-lint-rules = { git = "ssh://git@github.com/hiisi-digital/mockspace.git", branch = "main" }
+mockspace-lint-rules = { git = "ssh://git@github.com/hiisi-digital/mockspace.git", branch = "feat/lint-context-all-sources" }
 tree-sitter = "0.24"
 
 [dev-dependencies]

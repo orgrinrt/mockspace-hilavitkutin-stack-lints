@@ -49,26 +49,42 @@ impl Lint for ArvoTypesOnly {
         if ctx.is_proc_macro_crate() { return Vec::new(); }
         let mut out = Vec::new();
 
-        for (idx, raw_line) in ctx.source.lines().enumerate() {
-            let trimmed_start = raw_line.trim_start();
-            if trimmed_start.starts_with("//") { continue; }
-            if raw_line.contains("lint:allow(arvo-types-only)") { continue; }
+        // Scan every .rs file under src/ — module files (bits.rs,
+        // prim.rs, ufixed_impl.rs, ...) are where drift usually
+        // lives. Fall back to ctx.source only if the context carried
+        // no all_sources (older mockspace version).
+        let sources: Vec<(String, &str)> = if ctx.all_sources.is_empty() {
+            vec![("src/lib.rs".to_string(), ctx.source)]
+        } else {
+            ctx.all_sources
+                .iter()
+                .map(|f| (f.rel_path.display().to_string(), f.text.as_str()))
+                .collect()
+        };
 
-            let scan = strip_string_and_char_literals(raw_line);
-            let scan = strip_line_comment(&scan);
+        for (rel_path, source) in sources {
+            for (idx, raw_line) in source.lines().enumerate() {
+                let trimmed_start = raw_line.trim_start();
+                if trimmed_start.starts_with("//") { continue; }
+                if raw_line.contains("lint:allow(arvo-types-only)") { continue; }
 
-            for prim in BARE_PRIMITIVES {
-                if contains_bare_word(&scan, prim) {
-                    out.push(err(
-                        ctx,
-                        idx + 1,
-                        "arvo-types-only",
-                        format!(
-                            "bare `{prim}` at line {} — the stack has no bare numeric/bool primitives. Use an arvo type (UFixed / IFixed / FastFloat / StrictFloat / USize / Cap / Bool) or a domain alias grounded on one",
+                let scan = strip_string_and_char_literals(raw_line);
+                let scan = strip_line_comment(&scan);
+
+                for prim in BARE_PRIMITIVES {
+                    if contains_bare_word(&scan, prim) {
+                        out.push(err(
+                            ctx,
                             idx + 1,
-                        ),
-                    ));
-                    break;
+                            "arvo-types-only",
+                            format!(
+                                "bare `{prim}` in {} line {} — the stack has no bare numeric/bool primitives. Use an arvo type (UFixed / IFixed / FastFloat / StrictFloat / USize / Cap / Bool) or a domain alias grounded on one",
+                                rel_path,
+                                idx + 1,
+                            ),
+                        ));
+                        break;
+                    }
                 }
             }
         }
