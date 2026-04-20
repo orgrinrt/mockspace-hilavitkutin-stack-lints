@@ -1,0 +1,17 @@
+[package]
+name = "mockspace-hilavitkutin-stack-lints"
+version = "0.1.0"
+edition = "2021"
+description = "Mockspace lint pack for the hilavitkutin / arvo / notko / clause stack"
+license = "MPL-2.0"
+publish = false
+
+[dependencies]
+# Committed state points at the canonical mockspace repo. For local
+# iteration, use `[patch]` in `.cargo/config.toml` to redirect.
+# Tracks feat/external-lint-packs until the PR merges to main.
+mockspace-lint-rules = { git = "ssh://git@github.com/hiisi-digital/mockspace.git", branch = "feat/external-lint-packs" }
+tree-sitter = "0.24"
+
+[dev-dependencies]
+tempfile = "3"
