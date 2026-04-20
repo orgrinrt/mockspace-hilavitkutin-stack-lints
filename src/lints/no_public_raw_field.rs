@@ -151,6 +151,13 @@ fn scan_tuple_body(
     }
 }
 
+fn matches_introduced(ctx: &LintContext, forbidden: &str, type_text: &str) -> bool {
+    // Only skip when the crate explicitly introduces this specific
+    // forbidden token AND the field's type resolves to it.
+    if !ctx.introduces(forbidden) { return false; }
+    type_is(type_text, forbidden)
+}
+
 fn report_if_forbidden(
     ctx: &LintContext,
     out: &mut Vec<LintError>,
@@ -161,6 +168,7 @@ fn report_if_forbidden(
 ) {
     for forbidden in FORBIDDEN_FIELD_TYPES {
         if type_is(type_text, forbidden) {
+            if matches_introduced(ctx, forbidden, type_text) { return; }
             out.push(err(
                 ctx,
                 line,

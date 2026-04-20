@@ -46,6 +46,7 @@ fn ctx_with(source: &'static str) -> LintContext<'static> {
         workspace_root: std::path::Path::new("/tmp"),
         proc_macro_crates: &[],
         crate_prefix: "test",
+        primitive_introductions: Box::leak(Box::new(std::collections::BTreeMap::new())),
     }
 }
 
@@ -277,6 +278,7 @@ fn ctx_with_files(files: Vec<(&'static str, &'static str)>) -> LintContext<'stat
         workspace_root: std::path::Path::new("/tmp"),
         proc_macro_crates: &[],
         crate_prefix: "test",
+        primitive_introductions: Box::leak(Box::new(std::collections::BTreeMap::new())),
     }
 }
 
@@ -308,6 +310,132 @@ fn no_bare_option_fires_in_module_file_not_lib_rs() {
     assert!(
         hits.iter().any(|e| e.message.contains("src/resolve.rs")),
         "error message should name the offending file"
+    );
+}
+
+// ---- primitive-introductions (per-crate per-primitive skip) -------------
+
+fn ctx_with_crate_and_introductions(
+    crate_name: &'static str,
+    introductions: Vec<(&'static str, Vec<&'static str>)>,
+    source: &'static str,
+) -> LintContext<'static> {
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_rust::LANGUAGE.into())
+        .unwrap();
+    let tree = parser.parse(source, None).unwrap();
+    let tree: &'static tree_sitter::Tree = Box::leak(Box::new(tree));
+
+    let all_sources: &'static [CrateSourceFile] = Box::leak(Box::new(vec![
+        CrateSourceFile {
+            rel_path: std::path::PathBuf::from("src/lib.rs"),
+            text: source.to_string(),
+        },
+    ]));
+
+    let introductions_map: std::collections::BTreeMap<String, Vec<String>> = introductions
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.into_iter().map(|s| s.to_string()).collect()))
+        .collect();
+    let introductions_leaked: &'static std::collections::BTreeMap<String, Vec<String>> =
+        Box::leak(Box::new(introductions_map));
+
+    LintContext {
+        crate_name,
+        short_name: crate_name,
+        source,
+        tree,
+        all_sources,
+        deps: &[],
+        all_crates: Box::leak(Box::new(BTreeSet::new())),
+        design_doc: None,
+        all_doc_content: "",
+        shame_doc: None,
+        workspace_root: std::path::Path::new("/tmp"),
+        proc_macro_crates: &[],
+        crate_prefix: "test",
+        primitive_introductions: introductions_leaked,
+    }
+}
+
+#[test]
+fn arvo_types_only_skips_introduced_primitive() {
+    // arvo is configured to introduce `usize`, so the lint skips
+    // that token for the arvo crate.
+    let ctx = ctx_with_crate_and_introductions(
+        "arvo",
+        vec![("arvo", vec!["usize"])],
+        "pub struct USize(pub usize);\n",
+    );
+    let hits = ArvoTypesOnly.check(&ctx);
+    assert!(
+        hits.is_empty(),
+        "arvo introduces usize; lint must skip it on arvo"
+    );
+}
+
+#[test]
+fn arvo_types_only_fires_on_non_introduced_primitive() {
+    // arvo is configured to introduce only `usize`; a bare `u64`
+    // elsewhere in arvo is still drift.
+    let ctx = ctx_with_crate_and_introductions(
+        "arvo",
+        vec![("arvo", vec!["usize"])],
+        "pub fn width() -> u64 { 0 }\n",
+    );
+    let hits = ArvoTypesOnly.check(&ctx);
+    assert!(
+        !hits.is_empty(),
+        "arvo does not introduce u64; lint must still fire"
+    );
+}
+
+#[test]
+fn arvo_types_only_fires_on_non_introducer_crate() {
+    // hilavitkutin does NOT introduce any primitive; bare usize
+    // in its source is drift.
+    let ctx = ctx_with_crate_and_introductions(
+        "hilavitkutin",
+        vec![("arvo", vec!["usize"])],
+        "pub struct Counter(pub usize);\n",
+    );
+    let hits = ArvoTypesOnly.check(&ctx);
+    assert!(
+        !hits.is_empty(),
+        "hilavitkutin doesn't introduce usize; lint must fire"
+    );
+}
+
+#[test]
+fn no_bare_option_skips_when_crate_introduces_option() {
+    // Hypothetical: notko could be configured to "introduce"
+    // Option; lint skips.
+    let ctx = ctx_with_crate_and_introductions(
+        "notko",
+        vec![("notko", vec!["Option"])],
+        "fn iter() -> Option<u8> { None } // lint:allow(no-bare-numeric) reason: tracked: #99\n",
+    );
+    let hits = NoBareOption.check(&ctx);
+    assert!(
+        hits.is_empty(),
+        "notko introduces Option; no-bare-option must skip"
+    );
+}
+
+#[test]
+fn no_public_raw_field_skips_when_crate_introduces_field_type() {
+    // arvo-bits introduces u64 for Bits<N>(u64) storage.
+    let ctx = ctx_with_crate_and_introductions(
+        "arvo-bits",
+        vec![("arvo-bits", vec!["u64"])],
+        "pub struct Bits<const N: u8>(u64);\n",
+    );
+    let hits = NoPublicRawField.check(&ctx);
+    let u64_hits: Vec<_> = hits.iter().filter(|e| e.message.contains("`u64`")).collect();
+    assert!(
+        u64_hits.is_empty(),
+        "arvo-bits introduces u64; no-public-raw-field must skip it on arvo-bits"
     );
 }
 

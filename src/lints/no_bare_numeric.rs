@@ -52,6 +52,7 @@ impl Lint for NoBareNumeric {
                 let scan = strip_line_comment(&scan);
 
                 for prim in BARE_NUMERICS {
+                    if ctx.introduces(prim) { continue; }
                     if contains_bare_word(&scan, prim) {
                         out.push(err(
                             ctx,
