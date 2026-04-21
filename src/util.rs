@@ -36,6 +36,12 @@ pub mod categories {
     pub const NUMERIC: &str = "numeric";
     pub const FALLIBILITY: &str = "fallibility";
     pub const STRING: &str = "string";
+    /// Compile-time static string identity. The introducing crate
+    /// (hilavitkutin-str) defines interned string handles that replace
+    /// bare `const NAME: &str` / `static NAME: &str` across the stack;
+    /// other crates must gate any remaining static-string literals
+    /// behind `#[cfg(debug_assertions)]` so release builds drop them.
+    pub const STATIC_STRING: &str = "static-string";
 }
 
 /// Whether the current crate is declared (via

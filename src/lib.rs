@@ -22,6 +22,7 @@ pub mod lints {
     pub mod no_bare_result;
     pub mod no_bare_numeric;
     pub mod no_bare_string;
+    pub mod no_bare_static_str;
     pub mod no_dyn_dispatch;
     pub mod no_runtime_spawn;
     pub mod no_runtime_registration;
@@ -38,7 +39,8 @@ pub mod lints {
 use lints::{
     arvo_types_only::ArvoTypesOnly, lint_allow_requires_task_id::LintAllowRequiresTaskId,
     no_alloc::NoAlloc, no_bare_numeric::NoBareNumeric, no_bare_option::NoBareOption,
-    no_bare_result::NoBareResult, no_bare_string::NoBareString, no_dyn_dispatch::NoDynDispatch,
+    no_bare_result::NoBareResult, no_bare_static_str::NoBareStaticStr,
+    no_bare_string::NoBareString, no_dyn_dispatch::NoDynDispatch,
     no_public_raw_field::NoPublicRawField, no_runtime_registration::NoRuntimeRegistration,
     no_runtime_spawn::NoRuntimeSpawn, no_std::NoStd, no_vec_in_trait_sig::NoVecInTraitSig,
     semantic_alias_nudge::SemanticAliasNudge, strategy_marker_required::StrategyMarkerRequired,
@@ -53,6 +55,7 @@ mockspace_lint_rules::lint_pack! {
         NoBareResult,
         NoBareNumeric,
         NoBareString,
+        NoBareStaticStr,
         NoDynDispatch,
         NoRuntimeSpawn,
         NoRuntimeRegistration,
