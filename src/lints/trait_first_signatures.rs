@@ -22,7 +22,7 @@ impl Lint for TraitFirstSignatures {
     fn default_severity(&self) -> Severity { Severity::HARD_ERROR }
 
     fn check(&self, ctx: &LintContext) -> Vec<LintError> {
-        if ctx.is_proc_macro_crate() { return Vec::new(); }
+        if ctx.should_skip_proc_macro_source_lint() { return Vec::new(); }
         let mut out = Vec::new();
         for_each_fn(ctx.tree.root_node(), |node| {
             if !is_public(node, ctx.source) { return; }
