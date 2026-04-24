@@ -15,6 +15,7 @@ impl Lint for NoDynDispatch {
     fn default_severity(&self) -> Severity { Severity::HARD_ERROR }
 
     fn check(&self, ctx: &LintContext) -> Vec<LintError> {
+        if ctx.is_proc_macro_crate() { return Vec::new(); }
         let mut out = Vec::new();
         for (idx, line) in ctx.source.lines().enumerate() {
             let trimmed = line.trim_start();

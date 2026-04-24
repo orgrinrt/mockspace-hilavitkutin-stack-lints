@@ -40,6 +40,10 @@ impl Lint for NoAlloc {
     fn default_severity(&self) -> Severity { Severity::HARD_ERROR }
 
     fn check(&self, ctx: &LintContext) -> Vec<LintError> {
+        // Proc-macro crates run in the compiler host context and use std
+        // by construction. Their heap usage is not consumer-runtime heap.
+        if ctx.is_proc_macro_crate() { return Vec::new(); }
+
         let mut out = Vec::new();
 
         for (idx, line) in ctx.source.lines().enumerate() {
