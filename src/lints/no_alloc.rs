@@ -42,7 +42,7 @@ impl Lint for NoAlloc {
     fn check(&self, ctx: &LintContext) -> Vec<LintError> {
         // Proc-macro crates run in the compiler host context and use std
         // by construction. Their heap usage is not consumer-runtime heap.
-        if ctx.is_proc_macro_crate() { return Vec::new(); }
+        if ctx.should_skip_proc_macro_source_lint() { return Vec::new(); }
 
         let mut out = Vec::new();
 

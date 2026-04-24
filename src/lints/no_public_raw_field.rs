@@ -48,7 +48,7 @@ impl Lint for NoPublicRawField {
     fn default_severity(&self) -> Severity { Severity::HARD_ERROR }
 
     fn check(&self, ctx: &LintContext) -> Vec<LintError> {
-        if ctx.is_proc_macro_crate() { return Vec::new(); }
+        if ctx.should_skip_proc_macro_source_lint() { return Vec::new(); }
         // Per-category skip happens inside `report_if_forbidden`: a
         // `["numeric"]` crate skips numeric field types but still gets
         // `String` / `&str` field drift flagged.

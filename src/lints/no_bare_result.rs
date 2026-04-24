@@ -23,7 +23,7 @@ impl Lint for NoBareResult {
     fn default_severity(&self) -> Severity { Severity::HARD_ERROR }
 
     fn check(&self, ctx: &LintContext) -> Vec<LintError> {
-        if ctx.is_proc_macro_crate() { return Vec::new(); }
+        if ctx.should_skip_proc_macro_source_lint() { return Vec::new(); }
         let mut out = Vec::new();
 
         let sources: Vec<(String, &str)> = if ctx.all_sources.is_empty() {
