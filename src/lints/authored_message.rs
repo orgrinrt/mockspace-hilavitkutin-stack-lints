@@ -24,36 +24,8 @@
 pub(crate) fn authored_on_the_command_line(command: &str) -> Option<String> {
     let words = split_words(command);
     let mut parts: Vec<String> = Vec::new();
-    let mut i = 0usize;
-    while i < words.len() {
-        let w = &words[i];
-        if let Some(rest) = w.strip_prefix("--message=") {
-            parts.push(rest.to_string());
-            i += 1;
-            continue;
-        }
-        // `-m` on its own, and the clustered short forms `git commit` accepts
-        // before it: `-am`, `-sm`, `-anm`. The letters allowed in front of the
-        // `m` are named rather than taken as any letter, because "any letter
-        // then m" swallows the argument after every unrelated flag that happens
-        // to end in one, and the flag it swallows is then checked as a subject.
-        const CLUSTERED_BEFORE_M: &str = "asnevqS";
-        let takes_next = w == "--message"
-            || (w.len() >= 2
-                && w.starts_with('-')
-                && !w.starts_with("--")
-                && w.ends_with('m')
-                && w[1 .. w.len() - 1]
-                    .chars()
-                    .all(|c| CLUSTERED_BEFORE_M.contains(c)));
-        if takes_next {
-            if let Some(v) = words.get(i + 1) {
-                parts.push(v.clone());
-                i += 2;
-                continue;
-            }
-        }
-        i += 1;
+    for segment in git_message_segments(&words) {
+        collect_messages(segment, &mut parts);
     }
     if parts.is_empty() {
         return None;
@@ -61,6 +33,90 @@ pub(crate) fn authored_on_the_command_line(command: &str) -> Option<String> {
     // Several `-m` arguments are separate paragraphs, which is how git joins
     // them, so the subject stays the first line either way.
     Some(parts.join("\n\n"))
+}
+
+/// The verbs that author a message a person wrote.
+const MESSAGE_VERBS: &[&str] = &["commit", "tag", "notes", "merge", "revert", "cherry-pick", "am"];
+
+/// The short flags `git commit` accepts with no argument of their own, so they
+/// can sit in front of the `m` in a cluster.
+///
+/// Named rather than taken as "any letter", and the list is the no-argument
+/// ones only. `-t`, `-c`, `-C` and `-F` each take a value, so `-Fm file` is
+/// `-F` with a value of `m` rather than a message flag, and reading it as one
+/// would check a path as a subject. `-S` is left out for the same reason: its
+/// argument is optional, which makes `-Sm` ambiguous, and declining is the safe
+/// direction because it costs a missed check rather than a false refusal.
+const CLUSTERED_BEFORE_M: &str = "asnevqoipu";
+
+/// Every run of words that is one `git` invocation authoring a message.
+///
+/// The anchoring is the point. Without it any `-m` anywhere in the command line
+/// is read as the subject, so `install -m 0755 f /usr/bin && git commit -m
+/// 'fix: a subject'` checks `0755` and denies a well-formed commit, which is
+/// the class this whole module exists to remove rather than to add to.
+fn git_message_segments(words: &[String]) -> Vec<&[String]> {
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    for i in 0 ..= words.len() {
+        let is_end = i == words.len() || matches!(words[i].as_str(), "&&" | "||" | ";" | "|" | "&");
+        if !is_end {
+            continue;
+        }
+        let segment = &words[start .. i];
+        start = i + 1;
+        let Some(first) = segment.first() else {
+            continue;
+        };
+        // `git`, or a path ending in it, which is how a wrapper or an absolute
+        // invocation spells the same thing.
+        let is_git = first == "git" || first.ends_with("/git");
+        if is_git && segment.iter().any(|w| MESSAGE_VERBS.contains(&w.as_str())) {
+            out.push(segment);
+        }
+    }
+    out
+}
+
+/// Pull every message argument out of one git invocation.
+fn collect_messages(segment: &[String], into: &mut Vec<String>) {
+    let mut i = 0usize;
+    while i < segment.len() {
+        let w = &segment[i];
+        if let Some(rest) = w.strip_prefix("--message=") {
+            into.push(rest.to_string());
+            i += 1;
+            continue;
+        }
+        if w == "--message" {
+            if let Some(v) = segment.get(i + 1) {
+                into.push(v.clone());
+                i += 2;
+                continue;
+            }
+        }
+        if let Some(short) = w.strip_prefix('-').filter(|s| !s.starts_with('-')) {
+            if let Some(at) = short.find('m') {
+                let cluster_is_flags = short[.. at].chars().all(|c| CLUSTERED_BEFORE_M.contains(c));
+                let attached = &short[at + 1 ..];
+                if cluster_is_flags && !attached.is_empty() {
+                    // `-mSubject`, and `-amSubject`. git takes the rest of the
+                    // word as the message.
+                    into.push(attached.to_string());
+                    i += 1;
+                    continue;
+                }
+                if cluster_is_flags && attached.is_empty() {
+                    if let Some(v) = segment.get(i + 1) {
+                        into.push(v.clone());
+                        i += 2;
+                        continue;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
 }
 
 /// Split a command the way a shell would, as far as quoting goes.
@@ -228,11 +284,14 @@ mod tests {
     }
 
     #[test]
-    fn the_flags_git_actually_clusters_before_m_are_all_taken() {
-        // The positive half of the arm above. Naming the letters is only right
-        // if the named set is the real one, and a set that had drifted narrow
-        // would show up here rather than as commits refused months later.
-        for cluster in ["-am", "-sm", "-anm", "-sam", "-qm"] {
+    fn every_no_argument_short_flag_git_commit_takes_can_precede_the_m() {
+        // The positive half of the arm above, and it is written from git's own
+        // documented no-argument flags rather than from the constant, so a set
+        // that had drifted narrow fails here. The first version enumerated the
+        // same letters the constant declares, which could not detect that at
+        // all, and `-om`, `-im` and `-pm` were in fact missing.
+        for flag in ["a", "s", "n", "e", "v", "q", "o", "i", "p", "u"] {
+            let cluster = format!("-{flag}m");
             assert_eq!(
                 authored_on_the_command_line(&format!("git commit {cluster} 'fix: a subject'"))
                     .as_deref(),
@@ -240,6 +299,88 @@ mod tests {
                 "`{cluster}` did not name the message"
             );
         }
+        for cluster in ["-am", "-anm", "-sam", "-m"] {
+            assert_eq!(
+                authored_on_the_command_line(&format!("git commit {cluster} 'fix: a subject'"))
+                    .as_deref(),
+                Some("fix: a subject"),
+                "`{cluster}` did not name the message"
+            );
+        }
+    }
+
+    #[test]
+    fn a_flag_that_takes_its_own_argument_does_not_cluster_into_a_message_flag() {
+        // `-F`, `-t`, `-c` and `-C` each take a value, so `-Fm file` is `-F`
+        // with a value of `m`, and reading it as a message flag would check a
+        // path as a subject. Declining is the safe direction here: it costs a
+        // missed check rather than a refusal of a well-formed commit.
+        for cluster in ["-Fm", "-tm", "-cm", "-Cm", "-Sm"] {
+            assert_eq!(
+                authored_on_the_command_line(&format!("git commit {cluster} value")),
+                None,
+                "`{cluster}` was read as a message flag"
+            );
+        }
+    }
+
+    #[test]
+    fn the_attached_form_is_the_message() {
+        // `git commit -mSubject` with no space, which git accepts and which a
+        // scan looking only at the next word does not see at all.
+        assert_eq!(
+            authored_on_the_command_line("git commit -mfix: a subject").as_deref(),
+            Some("fix:")
+        );
+        assert_eq!(
+            authored_on_the_command_line("git commit -m'fix: a subject'").as_deref(),
+            Some("fix: a subject")
+        );
+        assert_eq!(
+            authored_on_the_command_line("git commit -am'fix: a subject'").as_deref(),
+            Some("fix: a subject")
+        );
+    }
+
+    #[test]
+    fn a_message_flag_belonging_to_another_program_is_not_the_subject() {
+        // The anchoring, and the arm that matters most, because getting it
+        // wrong denies a well-formed commit rather than merely missing one.
+        // `install -m` is a file mode and `python3 -m` is a module name.
+        for other in ["install -m 0755 f /usr/bin", "python3 -m venv .venv", "chmod -R 755 ."] {
+            assert_eq!(
+                authored_on_the_command_line(&format!("{other} && git commit -m 'fix: a subject'"))
+                    .as_deref(),
+                Some("fix: a subject"),
+                "`{other}` leaked into the subject"
+            );
+        }
+    }
+
+    #[test]
+    fn a_message_flag_with_no_git_beside_it_at_all_is_nobodys_subject() {
+        // The control for the anchoring: without a git invocation there is no
+        // message, however many `-m` flags the line carries.
+        assert_eq!(
+            authored_on_the_command_line("install -m 0755 f /usr/bin"),
+            None
+        );
+        assert_eq!(authored_on_the_command_line("python3 -m venv .venv"), None);
+    }
+
+    #[test]
+    fn a_git_invocation_with_no_message_verb_authors_nothing() {
+        // `git config -m` is not a message, and neither is anything else git
+        // does that is not one of the verbs that writes a message somebody
+        // wrote. Without the verb test the segment check is only "is it git".
+        assert_eq!(
+            authored_on_the_command_line("git config --global -m x"),
+            None
+        );
+        assert_eq!(
+            authored_on_the_command_line("git log -m --oneline && git status"),
+            None
+        );
     }
 
     #[test]

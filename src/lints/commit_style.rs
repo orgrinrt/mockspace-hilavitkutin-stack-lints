@@ -332,11 +332,6 @@ impl CommitStyle {
     }
 }
 
-/// The authored part of a commit message.
-///
-/// Drops comment lines and everything from git's verbose-diff scissors marker,
-/// so a convention violation quoted in the commented help text, or anything in an
-/// attached diff, cannot trip the lint.
 /// The text whose first line is the subject, which is not always `ctx.message`.
 ///
 /// Two callers hand this lint two different things. The `commit-msg` git hook
@@ -352,12 +347,30 @@ impl CommitStyle {
 /// where the command line cannot show it still reaches the `commit-msg` hook
 /// with the real file in hand.
 fn subject_source(ctx: &MessageContext) -> Option<String> {
-    let Some(command) = ctx.invocation.as_ref().and_then(|i| i.command) else {
+    let Some(invocation) = ctx.invocation.as_ref() else {
+        // No invocation at all: the `commit-msg` git hook, whose text is the
+        // message file. This is the path every arm in this file's test module
+        // other than the hook ones goes through.
         return Some(ctx.message.to_string());
     };
+    // FIXME: an MCP commit tool is not subject-checked. The gate spells
+    // `--command "$COMMAND"` unconditionally and such a tool has no shell
+    // command, so what arrives is `Some("")`, and its message is in a named
+    // field of the serialised input rather than on any command line. Reading
+    // the serialised input as a subject is what this whole change removes, so
+    // the two available answers are both wrong and this takes the quieter one.
+    // Closing it means either the gate passing the message it found, or this
+    // lint parsing the input, and the second wants a JSON dependency in a
+    // library every consumer loads. The gate side is the right half.
+    let command = invocation.command.filter(|c| !c.trim().is_empty())?;
     super::authored_message::authored_on_the_command_line(command)
 }
 
+/// The authored part of a commit message.
+///
+/// Drops comment lines and everything from git's verbose-diff scissors marker,
+/// so a convention violation quoted in the commented help text, or anything in
+/// an attached diff, cannot trip the lint.
 fn authored_body(message: &str) -> String {
     message
         .split("# ------------------------ >8")
@@ -511,6 +524,41 @@ mod tests {
         assert_eq!(
             check_from_a_hook(&l, "git commit -F /tmp/msg.txt"),
             Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn an_invocation_carrying_no_command_does_not_put_the_tool_input_in_front_of_the_subject() {
+        // What an MCP commit tool looks like here. The gate spells
+        // `--command "$COMMAND"` unconditionally and such a tool has no shell
+        // command, so `Some("")` arrives, and falling back to `ctx.message`
+        // would put the serialised input back where the subject belongs, which
+        // is the defect this whole change removes.
+        //
+        // The FIXME on `subject_source` is the other half: this leaves such a
+        // tool unchecked, and closing that is the gate's job rather than this
+        // lint's.
+        let l = hiisi();
+        let serialised = "{\"message\":\"Added Some Things.\",\"repo\":\"muisti\"}";
+        let ctx = MessageContext {
+            domain:     MessageDomain::CommitMessage,
+            mode:       mockspace_lint_rules::AgentMode::Assistant,
+            message:    serialised,
+            origin:     "<stdin>",
+            repo_root:  std::path::Path::new("/tmp"),
+            invocation: Some(mockspace_lint_rules::Invocation {
+                command:   Some(""),
+                tool_name: Some("mcp__git__commit"),
+            }),
+        };
+        let found: Vec<String> = l
+            .check_message(&ctx)
+            .into_iter()
+            .map(|e| e.finding_kind.unwrap_or("none").to_string())
+            .collect();
+        assert!(
+            found.is_empty(),
+            "the serialised input was judged as a subject: {found:?}"
         );
     }
 
