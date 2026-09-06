@@ -86,6 +86,13 @@ impl Lint for CommitStyle {
         LINT_NAME
     }
 
+    /// The subject is in the command when an agent hook is the caller, so this
+    /// lint cannot do its job without the invocation. `subject_source` says
+    /// what it does with it.
+    fn invocation_wanted(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &'static str {
         "a commit subject matches the project's declared convention"
     }
@@ -171,7 +178,10 @@ impl MessageLint for CommitStyle {
 
     fn check_message(&self, ctx: &MessageContext) -> Vec<LintError> {
         let mut out = Vec::new();
-        let body = authored_body(ctx.message);
+        let Some(text) = subject_source(ctx) else {
+            return out;
+        };
+        let body = authored_body(&text);
         let Some(subject) = body.lines().next() else {
             return out;
         };
@@ -327,6 +337,27 @@ impl CommitStyle {
 /// Drops comment lines and everything from git's verbose-diff scissors marker,
 /// so a convention violation quoted in the commented help text, or anything in an
 /// attached diff, cannot trip the lint.
+/// The text whose first line is the subject, which is not always `ctx.message`.
+///
+/// Two callers hand this lint two different things. The `commit-msg` git hook
+/// passes the message file, and that is the message. An agent's PreToolUse hook
+/// passes the serialised tool input, because it cannot parse a shell command in
+/// shell, and the first line of that is JSON. Reading the second as a subject
+/// reports a type of `{"command":"git commit -m 'fix` and a length that is the
+/// length of the command line, on every commit, however well written.
+///
+/// The invocation is what tells them apart: it is present only on the hook
+/// path. There, the subject comes out of the command or it does not come at
+/// all, and declining is right rather than cautious, since a message authored
+/// where the command line cannot show it still reaches the `commit-msg` hook
+/// with the real file in hand.
+fn subject_source(ctx: &MessageContext) -> Option<String> {
+    let Some(command) = ctx.invocation.as_ref().and_then(|i| i.command) else {
+        return Some(ctx.message.to_string());
+    };
+    super::authored_message::authored_on_the_command_line(command)
+}
+
 fn authored_body(message: &str) -> String {
     message
         .split("# ------------------------ >8")
@@ -409,6 +440,88 @@ mod tests {
             .into_iter()
             .map(|e| e.finding_kind.unwrap_or("none").to_string())
             .collect()
+    }
+
+    /// What an agent's PreToolUse hook actually hands over: the serialised tool
+    /// input as the text, and the command beside it as the invocation.
+    fn check_from_a_hook(l: &CommitStyle, command: &str) -> Vec<String> {
+        let serialised = format!(
+            "{{\"command\":\"{}\",\"description\":\"commit the change\"}}",
+            command.replace('"', "\\\"")
+        );
+        let ctx = MessageContext {
+            domain:     MessageDomain::CommitMessage,
+            mode:       mockspace_lint_rules::AgentMode::Assistant,
+            message:    &serialised,
+            origin:     "<stdin>",
+            repo_root:  std::path::Path::new("/tmp"),
+            invocation: Some(mockspace_lint_rules::Invocation {
+                command:   Some(command),
+                tool_name: Some("Bash"),
+            }),
+        };
+        l.check_message(&ctx)
+            .into_iter()
+            .map(|e| e.finding_kind.unwrap_or("none").to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_good_subject_through_a_hook_is_not_a_finding() {
+        // The defect this pair exists for. The text handed over is JSON, whose
+        // first line begins `{"command":"git commit -m 'fix`, so reading it as
+        // the subject reported a bad type and a length that was the length of
+        // the command. Every commit from an agent's shell was refused, and the
+        // message it was refused for was never the message.
+        let l = hiisi();
+        assert_eq!(
+            check_from_a_hook(&l, "git commit -m 'fix: a subject well under the limit'"),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn a_bad_subject_through_a_hook_is_still_caught() {
+        // The half that keeps the arm above from being a hole: if reading the
+        // command meant reading nothing, every commit would pass instead of
+        // every commit failing, which is worse and quieter.
+        let l = hiisi();
+        let found = check_from_a_hook(
+            &l,
+            "git commit -m 'Added Some Things And This Subject Runs Well Past The Seventy Two Character Limit.'",
+        );
+        assert!(
+            found.contains(&"subject-length".to_string()),
+            "the length went unreported: {found:?}"
+        );
+        assert!(
+            found.contains(&"subject-case".to_string()),
+            "the case went unreported: {found:?}"
+        );
+    }
+
+    #[test]
+    fn a_hook_call_that_authors_no_message_reports_nothing() {
+        // An editor commit, or one whose message is in a file. The subject is
+        // somewhere this cannot read, and the `commit-msg` hook is handed the
+        // real file moments later, so declining costs no coverage and guessing
+        // would refuse a message nobody has seen yet.
+        let l = hiisi();
+        assert_eq!(check_from_a_hook(&l, "git commit"), Vec::<String>::new());
+        assert_eq!(
+            check_from_a_hook(&l, "git commit -F /tmp/msg.txt"),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn the_commit_msg_hook_path_is_untouched() {
+        // The control for the three above: with no invocation the text is the
+        // message, which is how the git hook calls it, and every existing arm
+        // in this file goes through that path.
+        let l = hiisi();
+        assert!(check(&l, "fix: a subject well under the limit").is_empty());
+        assert!(!check(&l, "Added Some Thing.").is_empty());
     }
 
     #[test]
