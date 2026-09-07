@@ -54,19 +54,46 @@ pub(crate) fn body_on_the_command_line(command: &str) -> Option<String> {
     let words = split_words(command);
     for (segment, forge) in forge_body_segments(&words) {
         let long_eq = format!("{}=", forge.long);
-        let mut i = 0usize;
-        while i < segment.len() {
-            let w = &segment[i];
-            if w == forge.file {
+        let mut found: Option<Option<String>> = None;
+        for (i, w) in segment.iter().enumerate() {
+            // The file flag wins wherever it appears, so it is looked for
+            // across the whole segment rather than until the inline flag turns
+            // up. `gh` accepts both at once and publishes the file's contents,
+            // which this cannot open, so the honest answer is to decline
+            // rather than to judge the string the tool discarded.
+            if forge.file.iter().any(|f| w == f) {
                 return None;
             }
+            if found.is_some() {
+                continue;
+            }
             if let Some(rest) = w.strip_prefix(long_eq.as_str()) {
-                return unexpanded(rest);
+                found = Some(unexpanded(rest));
+                continue;
             }
             if w == forge.long || w == forge.short {
-                return segment.get(i + 1).and_then(|v| unexpanded(v));
+                // The next word, unless it is another flag: the tool would
+                // refuse that command, so there is no published body, and
+                // reading `-t` as a body of two characters is a refusal
+                // invented out of a command that never ran.
+                found = Some(
+                    segment
+                        .get(i + 1)
+                        .filter(|v| !v.starts_with('-'))
+                        .and_then(|v| unexpanded(v)),
+                );
+                continue;
             }
-            i += 1;
+            // `gh pr create -b'the body'` reaches here as one word, because
+            // that is how a shell hands it over and how the tool reads it.
+            if let Some(rest) = w.strip_prefix(forge.short) {
+                if !rest.is_empty() && !rest.starts_with('-') {
+                    found = Some(unexpanded(rest));
+                }
+            }
+        }
+        if let Some(body) = found {
+            return body;
         }
     }
     None
@@ -103,46 +130,86 @@ struct Forge {
     long:     &'static str,
     /// The short flag carrying the body.
     short:    &'static str,
-    /// The flag naming a file, which this cannot open, so it declines rather
-    /// than measuring the path.
-    file:     &'static str,
+    /// The flags naming a file, which this cannot open, so it declines rather
+    /// than measuring the path. Long and short both, since a tool that
+    /// documents `-F, --body-file` accepts either and reading only one leaves
+    /// the other measuring an inline flag whose text the file overrides.
+    file:     &'static [&'static str],
 }
 
 /// What is covered, which is what these rows say and nothing wider.
 ///
-/// Read off `gh pr create --help`, `gh issue create --help`, `gh release create
-/// --help`, `glab mr create --help` and `glab issue create --help`. A forge or
-/// a subcommand absent from this table is not checked, and the arms below name
-/// each row so removing one fails.
+/// Each row's flags were read off that tool's own help output: `gh pr create`,
+/// `gh issue create`, `gh release create`, `glab mr create` and `glab issue
+/// create`. Nothing enforces that they stay right when a tool changes its
+/// flags, so the arms below name every flag in every row and the negative arms
+/// name the spellings the tools reject; a row that goes stale fails there
+/// rather than silently reading nothing.
+///
+/// **What is not covered**: any forge program absent from this table, any
+/// subcommand of these absent from its row, `--web` and editor-driven
+/// authoring where the body never reaches a command line at all, and a body
+/// built by a shell substitution the hook receives unexpanded. Each of those
+/// reads as no body, which means the shape checks say nothing rather than
+/// saying something wrong.
 const FORGES: &[Forge] = &[
     Forge {
         tool:     "gh",
         subjects: &["pr", "issue"],
         long:     "--body",
         short:    "-b",
-        file:     "--body-file",
+        file:     &["--body-file", "-F"],
     },
     Forge {
         tool:     "gh",
         subjects: &["release"],
         long:     "--notes",
         short:    "-n",
-        file:     "--notes-file",
+        file:     &["--notes-file", "-F"],
     },
     Forge {
         tool:     "glab",
         subjects: &["mr", "issue"],
         long:     "--description",
         short:    "-d",
-        file:     "--description-file",
+        file:     &["--description-file"],
     },
 ];
 
-/// Every run of words that is one forge invocation carrying a body, with the
-/// row saying which flags that invocation accepts.
+/// What may sit in front of the program without changing which program it is.
+///
+/// A command is anchored on its first word so an unrelated `--body` earlier in
+/// the line is not read as the pull request's. That anchoring is right and it
+/// was too strict: `VAR=x gh pr create` and `(gh pr create ...)` are the same
+/// invocation with something harmless in front, and refusing to see them means
+/// the shape checks silently pass on a command they were written for.
+fn strip_prefixes(segment: &[String]) -> &[String] {
+    let mut rest = segment;
+    while let Some(first) = rest.first() {
+        let name_value = first.split_once('=').is_some_and(|(k, _)| {
+            !k.is_empty() && k.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+        });
+        if name_value
+            || matches!(
+                first.as_str(),
+                "env" | "command" | "exec" | "nohup" | "time" | "(" | "{"
+            )
+        {
+            rest = &rest[1 ..];
+            continue;
+        }
+        break;
+    }
+    rest
+}
+
+/// Each run of words that is one forge invocation this knows the flags of,
+/// with the row saying which flags that invocation accepts.
 ///
 /// Anchored the same way the message scan is, and for the same reason: an
 /// unrelated `--body` earlier in a command line is not the pull request's.
+/// What the anchor allows in front of the program is [`strip_prefixes`], and
+/// what it will not see at all is whatever [`FORGES`] does not name.
 fn forge_body_segments(words: &[String]) -> Vec<(&[String], &'static Forge)> {
     let mut out = Vec::new();
     let mut start = 0usize;
@@ -151,16 +218,25 @@ fn forge_body_segments(words: &[String]) -> Vec<(&[String], &'static Forge)> {
         if !is_end {
             continue;
         }
-        let segment = &words[start .. i];
+        let segment = strip_prefixes(&words[start .. i]);
         start = i + 1;
         let Some(first) = segment.first() else {
             continue;
         };
+        // A subshell or a group puts a bracket on the front of the program's
+        // own word, since neither is separated by whitespace. Nothing else in
+        // a program name is one of these.
+        let program = first.trim_start_matches(['(', '{']);
         for forge in FORGES {
-            let is_tool = first == forge.tool || first.ends_with(&format!("/{}", forge.tool));
+            let is_tool = program == forge.tool || program.ends_with(&format!("/{}", forge.tool));
+            // Every matching row, not the first. One program appears in more
+            // than one row and a subcommand word can also be an argument, so
+            // `gh release create pr --notes 'x'` matches the row for `gh pr`
+            // as well; stopping at the first match answers `None` for a
+            // command that plainly carries a body. Each row is then tried in
+            // turn and the first that finds one answers.
             if is_tool && segment.iter().any(|w| forge.subjects.contains(&w.as_str())) {
                 out.push((segment, forge));
-                break;
             }
         }
     }
@@ -195,14 +271,15 @@ fn git_message_segments(words: &[String]) -> Vec<&[String]> {
         if !is_end {
             continue;
         }
-        let segment = &words[start .. i];
+        let segment = strip_prefixes(&words[start .. i]);
         start = i + 1;
         let Some(first) = segment.first() else {
             continue;
         };
         // `git`, or a path ending in it, which is how a wrapper or an absolute
         // invocation spells the same thing.
-        let is_git = first == "git" || first.ends_with("/git");
+        let program = first.trim_start_matches(['(', '{']);
+        let is_git = program == "git" || program.ends_with("/git");
         if is_git && segment.iter().any(|w| MESSAGE_VERBS.contains(&w.as_str())) {
             out.push(segment);
         }
@@ -272,6 +349,18 @@ fn split_words(command: &str) -> Vec<String> {
                     started = false;
                 }
             },
+            // A subshell or a group needs no whitespace around it, so its
+            // brackets arrive stuck to the program's name and to the last
+            // argument. Unquoted they are shell syntax and never part of a
+            // word, and leaving them attached puts a bracket on the end of
+            // every body written inside one.
+            '(' | ')' | '{' | '}' => {
+                if started {
+                    words.push(std::mem::take(&mut cur));
+                    started = false;
+                }
+                words.push(c.to_string());
+            },
             '\'' => {
                 started = true;
                 for q in chars.by_ref() {
@@ -302,9 +391,36 @@ fn split_words(command: &str) -> Vec<String> {
                 }
             },
             '\\' => {
-                started = true;
-                if let Some(n) = chars.next() {
-                    cur.push(n);
+                // A backslash before a newline is a line continuation: the
+                // shell removes both and the command carries on, so neither is
+                // a word and neither is content. Pushing the newline instead
+                // put a one-character word where the next flag was expected,
+                // which read as a body of `"\n"` and refused a perfectly
+                // ordinary pull request for a length it never had.
+                match chars.peek() {
+                    Some('\n') => {
+                        chars.next();
+                        if started {
+                            words.push(std::mem::take(&mut cur));
+                            started = false;
+                        }
+                    },
+                    Some('\r') => {
+                        chars.next();
+                        if chars.peek() == Some(&'\n') {
+                            chars.next();
+                        }
+                        if started {
+                            words.push(std::mem::take(&mut cur));
+                            started = false;
+                        }
+                    },
+                    _ => {
+                        started = true;
+                        if let Some(n) = chars.next() {
+                            cur.push(n);
+                        }
+                    },
                 }
             },
             _ => {
@@ -668,14 +784,123 @@ mod tests {
             None
         );
         // Both flags at once is the only shape where naming the file flag
-        // changes an answer, since the file forms share no spelling with the
-        // body forms and fall through to nothing on their own. `gh` refuses
-        // such a command outright, so nothing is published and there is
-        // nothing to judge; reading the inline one would judge a string the
-        // tool never accepted.
+        // changes an answer, since the file forms otherwise fall through to
+        // nothing on their own. `gh` accepts such a command and the file wins,
+        // which is why this declines: what publishes is a file this cannot
+        // open, and reading the inline flag would judge the string the tool
+        // discarded. The order does not matter, so both are here.
         assert_eq!(
             body_on_the_command_line("gh pr create --body-file /tmp/b.md --body 'inline'"),
             None
+        );
+        assert_eq!(
+            body_on_the_command_line("gh pr create --body 'inline' --body-file /tmp/b.md"),
+            None
+        );
+        // The short spelling of the same flag, which `gh pr create --help` and
+        // `gh release create --help` both document as `-F`.
+        assert_eq!(
+            body_on_the_command_line("gh pr create -F /tmp/b.md -b 'inline'"),
+            None
+        );
+        assert_eq!(
+            body_on_the_command_line("gh release create v1 -F /tmp/n.md -n 'inline'"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_line_continuation_is_not_a_word_and_is_not_a_body() {
+        // A backslash before a newline is removed by the shell along with the
+        // newline, so neither is content. Pushing the newline put a
+        // one-character word where the next flag was expected, and the lint
+        // then measured a body of one character and refused a pull request at
+        // `HARD_ERROR` for a length it never had. It hits the commit side the
+        // same way.
+        assert_eq!(
+            body_on_the_command_line("gh pr create --title 'x' --body \\\n  'the body'").as_deref(),
+            Some("the body")
+        );
+        assert_eq!(
+            authored_on_the_command_line("git commit -m \\\n  'fix: a subject'").as_deref(),
+            Some("fix: a subject")
+        );
+        // Carriage return and newline together, which is what a command
+        // written on one platform and run on another carries.
+        assert_eq!(
+            body_on_the_command_line("gh pr create --body \\\r\n  'the body'").as_deref(),
+            Some("the body")
+        );
+        // A backslash before anything else still escapes it, which is the
+        // behaviour this must not have taken away.
+        assert_eq!(
+            body_on_the_command_line("gh pr create --body it\\ works").as_deref(),
+            Some("it works")
+        );
+    }
+
+    #[test]
+    fn something_harmless_in_front_of_the_program_does_not_hide_it() {
+        // The anchor is right and was too strict. Each of these is the same
+        // invocation with something in front that changes nothing about it,
+        // and reading none of them means the shape checks pass silently on
+        // commands they were written for.
+        for command in [
+            "GH_TOKEN=x gh pr create --body 'the body'",
+            "GH_TOKEN=x GH_HOST=example.test gh pr create --body 'the body'",
+            "env gh pr create --body 'the body'",
+            "(gh pr create --body 'the body')",
+            "nohup gh pr create --body 'the body'",
+            "/opt/homebrew/bin/gh pr create --body 'the body'",
+        ] {
+            assert_eq!(
+                body_on_the_command_line(command).as_deref(),
+                Some("the body"),
+                "`{command}` hid the body"
+            );
+        }
+        assert_eq!(
+            authored_on_the_command_line("GIT_AUTHOR_NAME=x git commit -m 'fix: a subject'")
+                .as_deref(),
+            Some("fix: a subject")
+        );
+        assert_eq!(
+            authored_on_the_command_line("/usr/bin/git commit -m 'fix: a subject'").as_deref(),
+            Some("fix: a subject")
+        );
+    }
+
+    #[test]
+    fn a_short_flag_with_its_value_attached_is_read() {
+        // `gh` accepts `-b'value'`, and a shell hands that over as one word
+        // because the quote does not separate it. Reading only the separated
+        // form leaves every check returning nothing on a spelling the tool
+        // takes.
+        assert_eq!(
+            body_on_the_command_line("gh pr create -b'the body'").as_deref(),
+            Some("the body")
+        );
+        assert_eq!(
+            body_on_the_command_line("glab mr create -d'the body'").as_deref(),
+            Some("the body")
+        );
+        // Another flag is not a value, so `-bt` is not a body of `t`.
+        assert_eq!(body_on_the_command_line("gh pr create -b -t 'x'"), None);
+    }
+
+    #[test]
+    fn a_command_matching_two_rows_is_read_by_the_row_that_finds_a_body() {
+        // `gh` is in two rows and a subcommand word can also be an argument, so
+        // a release whose tag happens to be `pr` matches both. Answering with
+        // the first row alone gives `None` for a command that plainly carries
+        // one, which is a shape check silently switched off.
+        assert_eq!(
+            body_on_the_command_line("gh release create pr --notes 'the notes'").as_deref(),
+            Some("the notes")
+        );
+        assert_eq!(
+            body_on_the_command_line("gh release create issue -n 'the notes'").as_deref(),
+            Some("the notes")
         );
     }
 

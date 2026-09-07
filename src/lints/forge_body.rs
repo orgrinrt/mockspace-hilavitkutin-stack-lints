@@ -114,10 +114,13 @@ impl MessageLint for ForgeBody {
         // A forbidden pattern is the other way round. Narrowing that scan to
         // the extracted body loses every shape the extractor does not reach and
         // loses the title, which publishes exactly as the body does, so a
-        // pattern moved from one to the other stops being seen. Over-reading
-        // costs a refusal on a command that mentions the pattern without
-        // publishing it, which is a refusal somebody can answer; under-reading
-        // publishes the thing.
+        // pattern moved from one to the other stops being seen.
+        //
+        // The price is stated rather than minimised: on the hook path this text
+        // is the whole serialised tool input, so the pattern is also caught in
+        // a file path and in the agent's own description of the call, neither
+        // of which publishes anything. That is a refusal somebody can read and
+        // answer in one edit, and the other direction publishes the thing.
         let everything = ctx.message.to_ascii_lowercase();
         for (pattern, reason) in &self.forbidden {
             if everything.contains(&pattern.to_ascii_lowercase()) {
@@ -311,6 +314,36 @@ mod tests {
             assert!(
                 found.contains(&"forbidden-pattern".to_string()),
                 "the pattern was published unseen by `{command}`: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_shape_checks_reach_every_invocation_shape_the_table_covers() {
+        // The arm above passes whatever the extractor does, because the
+        // forbidden scan never consults it, so on its own it reads as coverage
+        // of these shapes and is coverage of nothing about them. This is the
+        // half that actually names them: each of these carries a body of nine
+        // characters against a configured minimum of forty, and each has to be
+        // refused for that.
+        let l = with(&[("min_length", "40")]);
+        for command in [
+            "gh pr create -b 'too short'",
+            "gh pr create -b'too short'",
+            "GH_TOKEN=x gh pr create --body 'too short'",
+            "(gh pr create --body 'too short')",
+            "env gh pr create --body 'too short'",
+            "/opt/homebrew/bin/gh pr create --body 'too short'",
+            "gh issue create -b 'too short'",
+            "gh release create v1 --notes 'too short'",
+            "gh release create v1 -n 'too short'",
+            "glab mr create --description 'too short'",
+            "glab issue create -d 'too short'",
+        ] {
+            let found = check_from_a_hook(&l, command);
+            assert!(
+                found.contains(&"too-short".to_string()),
+                "`{command}` was not measured at all: {found:?}"
             );
         }
     }
