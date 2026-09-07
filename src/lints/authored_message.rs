@@ -85,6 +85,20 @@ pub(crate) fn body_on_the_command_line(command: &str) -> Option<String> {
             }
             // `gh pr create -b'the body'` reaches here as one word, because
             // that is how a shell hands it over and how the tool reads it.
+            //
+            // It is only that when it is in flag position. `--label '-bug'`
+            // has the same shape and is somebody's label, and reading it as a
+            // body of `ug` refuses a pull request whose body was fine. pflag
+            // decides by position and so does this: a word right after a flag
+            // this does not know may be that flag's value, so it is not read
+            // as an attached one. That misses an attached body after an
+            // unknown flag, which costs a check, where the other direction
+            // costs a refusal.
+            let after_unknown_flag =
+                i > 0 && segment[i - 1].starts_with('-') && !segment[i - 1].contains('=');
+            if after_unknown_flag {
+                continue;
+            }
             if let Some(rest) = w.strip_prefix(forge.short) {
                 if !rest.is_empty() {
                     found = Some(unexpanded(rest));
@@ -108,6 +122,24 @@ pub(crate) fn body_on_the_command_line(command: &str) -> Option<String> {
 /// shape and is the only direction that does not invent a refusal.
 fn unexpanded(value: &str) -> Option<String> {
     if value.contains("$(") || value.contains("${") || value.contains('`') {
+        return None;
+    }
+    // `"$BODY"` is the commonest of the four and was the one not tested. It
+    // carries none of the three markers above, so it was measured as five
+    // characters and refused at hard error. A dollar followed by the start of
+    // a shell name is a parameter, and a dollar followed by anything else is a
+    // dollar.
+    if value
+        .match_indices('$')
+        .any(|(i, _)| value[i + 1 ..].starts_with(|c: char| c.is_ascii_alphabetic() || c == '_'))
+    {
+        return None;
+    }
+    // A lone dash is not a body. `glab mr create -d -` opens an editor, which
+    // is the same situation as a file this cannot read, and measuring one
+    // character against a configured minimum refuses a command that published
+    // whatever the author typed there.
+    if value == "-" {
         return None;
     }
     Some(value.to_string())
@@ -270,9 +302,6 @@ fn forge_body_segments(words: &[String]) -> Vec<(&[String], &'static Forge)> {
         let Some(first) = segment.first() else {
             continue;
         };
-        // A subshell or a group puts a bracket on the front of the program's
-        // own word, since neither is separated by whitespace. Nothing else in
-        // a program name is one of these.
         for forge in FORGES {
             let is_tool = first == forge.tool || first.ends_with(&format!("/{}", forge.tool));
             // Every matching row, not the first. One program appears in more
@@ -401,6 +430,14 @@ fn split_words(command: &str) -> Vec<String> {
             // a substitution, so a hard error was raised against a command
             // publishing an ordinary body. This arm has to come before the
             // bracket arm and stay before it.
+            //
+            // The nesting counter below, and the backtick arm after it, have
+            // no answer they can change today, and no arm can pin them: any
+            // way of splitting a substitution leaves the opening marker on the
+            // fragment the flag consumed, and the guard declines on that
+            // marker. They are here so the splitter's model of a command line
+            // is right rather than accidentally adequate, which is what the
+            // bracket arm was before it broke the guard twenty lines down.
             '$' if matches!(chars.peek(), Some('(') | Some('{')) => {
                 started = true;
                 cur.push('$');
@@ -1057,6 +1094,15 @@ mod tests {
             "gh pr create --title 'x' --body `cat /tmp/body.md`",
             "gh pr create --title 'x' --body \"$(cat /tmp/body.md)\"",
             "gh pr create --title 'x' --body $(printf '%s' \"$(cat a) $(cat b)\")",
+            // The bare form, which is the commonest of the four and the one
+            // the earlier rows did not sample. It carries none of the three
+            // markers the guard started with, so it was measured as five
+            // characters and refused.
+            "gh pr create --title 'x' --body \"$BODY\"",
+            "gh pr create --title 'x' --body $BODY",
+            "gh pr create --title 'x' --body=$BODY",
+            "gh pr create --title 'x' --body \"see $HOME for the rest\"",
+            "gh pr create --title 'x' --body \"${_private}\"",
         ] {
             assert_eq!(
                 body_on_the_command_line(command),
@@ -1070,6 +1116,8 @@ mod tests {
             "git commit -m \"$(cat /tmp/msg)\"",
             "git commit -m ${MSG}",
             "git commit -m$(cat /tmp/msg)",
+            "git commit -m \"$MSG\"",
+            "git commit -m$MSG",
         ] {
             assert_eq!(
                 authored_on_the_command_line(command),
@@ -1077,6 +1125,73 @@ mod tests {
                 "`{command}` was measured rather than declined"
             );
         }
+        // A dollar that is not a parameter is a dollar. Refusing these would
+        // be the same class of invented refusal pointed the other way, and a
+        // body that mentions a price is ordinary.
+        assert_eq!(
+            body_on_the_command_line("gh pr create --body 'it costs $5 a month'").as_deref(),
+            Some("it costs $5 a month")
+        );
+        assert_eq!(
+            body_on_the_command_line("gh pr create --body 'the $ sign'").as_deref(),
+            Some("the $ sign")
+        );
+    }
+
+    #[test]
+    fn a_lone_dash_is_an_editor_rather_than_a_body() {
+        // `glab mr create --help` on 1.116.0: the description flag set to `-`
+        // opens an editor, so what publishes is whatever was typed there and
+        // this cannot read it. Measuring one character against a configured
+        // minimum refuses a command that published a real body. `gh` spells
+        // the same thing `-F -`, which the file flag already declines.
+        assert_eq!(
+            body_on_the_command_line("glab mr create --title 'x' -d -"),
+            None
+        );
+        assert_eq!(
+            body_on_the_command_line("glab issue create --description -"),
+            None
+        );
+        assert_eq!(body_on_the_command_line("gh pr create --body -"), None);
+    }
+
+    #[test]
+    fn the_word_a_flag_consumed_is_not_read_again() {
+        // A value beginning with the short flag's letters is that flag's
+        // value, not another spelling of the flag. Re-examining it read
+        // `--label '-bug'` as a body of `ug`, and the last spelling winning
+        // then preferred those three characters over the body somebody wrote.
+        for (command, want) in [
+            (
+                "gh pr create --body 'a body long enough to be ordinary' --label '-bug'",
+                "a body long enough to be ordinary",
+            ),
+            (
+                "gh release create v1 --notes 'release notes of some length' --title '-nope'",
+                "release notes of some length",
+            ),
+            (
+                "glab mr create --description 'a description of some length' --title '-draft'",
+                "a description of some length",
+            ),
+        ] {
+            assert_eq!(
+                body_on_the_command_line(command).as_deref(),
+                Some(want),
+                "`{command}` read somebody's argument as the body"
+            );
+        }
+    }
+
+    #[test]
+    fn the_joined_spelling_takes_the_last_one_too() {
+        // The separated form's last-wins is pinned above; this is the other
+        // spelling of the same rule.
+        assert_eq!(
+            body_on_the_command_line("gh pr create --body=a --body=the-real-body").as_deref(),
+            Some("the-real-body")
+        );
     }
 
     #[test]
@@ -1109,7 +1224,7 @@ mod tests {
         // One row per entry in `strip_prefixes`, so removing any of them fails
         // here rather than silently switching both shape checks off for that
         // spelling.
-        for prefix in ["env", "command", "exec", "nohup", "time", "sudo"] {
+        for prefix in ["env", "command", "exec", "nohup", "time", "sudo", "(", "{"] {
             assert_eq!(
                 body_on_the_command_line(&format!("{prefix} gh pr create --body 'the body'"))
                     .as_deref(),
