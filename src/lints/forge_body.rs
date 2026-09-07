@@ -101,6 +101,33 @@ impl MessageLint for ForgeBody {
 
     fn check_message(&self, ctx: &MessageContext) -> Vec<LintError> {
         let mut out = Vec::new();
+
+        // The forbidden scan reads everything, and the two shape checks read
+        // only what was authored. That asymmetry is deliberate and it is not
+        // the same defect wearing two faces.
+        //
+        // A shape check over the whole text answers about the command: a
+        // configured minimum is satisfied by a long command carrying an empty
+        // body, and a required section is found among the command's own words.
+        // Both fail permissively, so narrowing them is the fix.
+        //
+        // A forbidden pattern is the other way round. Narrowing that scan to
+        // the extracted body loses every shape the extractor does not reach and
+        // loses the title, which publishes exactly as the body does, so a
+        // pattern moved from one to the other stops being seen. Over-reading
+        // costs a refusal on a command that mentions the pattern without
+        // publishing it, which is a refusal somebody can answer; under-reading
+        // publishes the thing.
+        let everything = ctx.message.to_ascii_lowercase();
+        for (pattern, reason) in &self.forbidden {
+            if everything.contains(&pattern.to_ascii_lowercase()) {
+                out.push(finding(ctx, "forbidden-pattern", &match reason {
+                    Some(r) => format!("`{pattern}` is not permitted here: {r}"),
+                    None => format!("`{pattern}` is not permitted here"),
+                }));
+            }
+        }
+
         let Some(body) = body_source(ctx) else {
             return out;
         };
@@ -127,15 +154,6 @@ impl MessageLint for ForgeBody {
                         self.min_length
                     ),
                 ));
-            }
-        }
-
-        for (pattern, reason) in &self.forbidden {
-            if lower.contains(&pattern.to_ascii_lowercase()) {
-                out.push(finding(ctx, "forbidden-pattern", &match reason {
-                    Some(r) => format!("`{pattern}` is not permitted here: {r}"),
-                    None => format!("`{pattern}` is not permitted here"),
-                }));
             }
         }
 
@@ -166,8 +184,7 @@ fn body_source(ctx: &MessageContext) -> Option<String> {
     let Some(invocation) = ctx.invocation.as_ref() else {
         return Some(ctx.message.to_string());
     };
-    let command = invocation.command.filter(|c| !c.trim().is_empty())?;
-    super::authored_message::body_on_the_command_line(command)
+    super::authored_message::body_on_the_command_line(invocation.command?)
 }
 
 fn finding(ctx: &MessageContext, kind: &'static str, message: &str) -> LintError {
@@ -272,6 +289,89 @@ mod tests {
         let l = with(&[("min_length", "40")]);
         assert!(check_from_a_hook(&l, "gh pr create --body-file /tmp/b.md").is_empty());
         assert!(check_from_a_hook(&l, "gh pr create --title 'x'").is_empty());
+    }
+
+    #[test]
+    fn a_forbidden_pattern_is_caught_on_every_shape_the_extractor_cannot_read() {
+        // The direction the other two checks go the opposite way, and the one
+        // that has to be got right, because narrowing this scan loses the
+        // pattern rather than reporting it. Every row here is a command the
+        // extractor returns `None` or a clean body for, and every one of them
+        // publishes the pattern.
+        let l = with(&[("forbidden", "internal.corp")]);
+        for command in [
+            "gh pr create -b 'see internal.corp for the rest'",
+            "gh pr create --title 'fix: move off internal.corp' --body 'a clean body'",
+            "glab mr create --description 'see internal.corp'",
+            "gh release create v1 --notes 'see internal.corp'",
+            "GH_TOKEN=x gh pr create --body 'see internal.corp'",
+            "gh pr create --body-file /tmp/b.md # internal.corp",
+        ] {
+            let found = check_from_a_hook(&l, command);
+            assert!(
+                found.contains(&"forbidden-pattern".to_string()),
+                "the pattern was published unseen by `{command}`: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_body_with_nothing_forbidden_in_it_is_not_refused() {
+        // The control for the arm above. A scan that reads everything is only
+        // useful if it still says no when there is nothing there, and one that
+        // always fires would satisfy every row above while catching nothing.
+        let l = with(&[("forbidden", "internal.corp")]);
+        assert!(
+            check_from_a_hook(&l, "gh pr create --body 'an ordinary body'").is_empty(),
+            "a clean command was refused"
+        );
+    }
+
+    #[test]
+    fn the_lint_asks_the_host_for_the_invocation() {
+        // Without this the host hands `invocation: None`, `body_source` falls
+        // back to the whole serialised tool input, and the defect every arm
+        // above pins comes back with all of them still green, because each one
+        // builds its own context and none of them can see the request.
+        assert!(
+            ForgeBody::default().invocation_wanted(),
+            "the lint reads a command it never asked for"
+        );
+        assert!(
+            super::super::commit_style::CommitStyle::default().invocation_wanted(),
+            "the subject lint reads a command it never asked for"
+        );
+    }
+
+    #[test]
+    fn an_invocation_carrying_no_command_judges_no_shape_and_still_reads_everything() {
+        // A host can hand over an invocation with nothing in it. There is then
+        // no body to measure, so the shape checks say nothing rather than
+        // measuring the serialised input, and the forbidden scan runs anyway
+        // because it never depended on the extraction.
+        let l = with(&[("min_length", "40"), ("forbidden", "internal.corp")]);
+        let judged = |message: &str| -> Vec<String> {
+            let ctx = MessageContext {
+                domain: MessageDomain::PullRequestBody,
+                mode: AgentMode::Assistant,
+                message,
+                origin: "<stdin>",
+                repo_root: std::path::Path::new("/tmp"),
+                invocation: Some(mockspace_lint_rules::Invocation {
+                    command:   Some("   "),
+                    tool_name: Some("Bash"),
+                }),
+            };
+            l.check_message(&ctx)
+                .into_iter()
+                .map(|e| e.finding_kind.unwrap_or("none").to_string())
+                .collect()
+        };
+        assert!(
+            judged("short").is_empty(),
+            "the serialised input was measured as a body"
+        );
+        assert_eq!(judged("short internal.corp"), vec!["forbidden-pattern"]);
     }
 
     #[test]

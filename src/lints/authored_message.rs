@@ -42,20 +42,29 @@ pub(crate) fn authored_on_the_command_line(command: &str) -> Option<String> {
 /// command line, and a body lint with a configured minimum would refuse a
 /// perfectly ordinary pull request for a length it never had.
 ///
+/// Which flag carries it depends on the program and the subcommand, and
+/// [`FORGES`] is the table of what is read. A row is a shape somebody checked
+/// against that tool's own help output; anything absent from it reads as no
+/// body rather than as an empty one.
+///
 /// `Some("")` is a real answer and a different one from `None`: `--body ''` is a
 /// body that is deliberately empty, which some conventions require, and a lint
 /// that cannot tell it from no body at all cannot check that convention.
 pub(crate) fn body_on_the_command_line(command: &str) -> Option<String> {
     let words = split_words(command);
-    for segment in forge_body_segments(&words) {
+    for (segment, forge) in forge_body_segments(&words) {
+        let long_eq = format!("{}=", forge.long);
         let mut i = 0usize;
         while i < segment.len() {
             let w = &segment[i];
-            if let Some(rest) = w.strip_prefix("--body=") {
-                return Some(rest.to_string());
+            if w == forge.file {
+                return None;
             }
-            if w == "--body" {
-                return segment.get(i + 1).cloned();
+            if let Some(rest) = w.strip_prefix(long_eq.as_str()) {
+                return unexpanded(rest);
+            }
+            if w == forge.long || w == forge.short {
+                return segment.get(i + 1).and_then(|v| unexpanded(v));
             }
             i += 1;
         }
@@ -63,17 +72,78 @@ pub(crate) fn body_on_the_command_line(command: &str) -> Option<String> {
     None
 }
 
-/// The forge programs whose subcommands author a body.
-const FORGE_TOOLS: &[&str] = &["gh", "glab"];
+/// A value the shell would have replaced before the tool saw it.
+///
+/// `--body "$(git log ...)"` reaches a hook as those ten characters, so
+/// measuring them measures the substitution rather than the body, and a
+/// configured minimum then refuses a release pull request for a length it never
+/// had. That command is the workspace's own, written down in its branch rules,
+/// so this is not a hypothetical. Declining costs a missed check on one command
+/// shape and is the only direction that does not invent a refusal.
+fn unexpanded(value: &str) -> Option<String> {
+    if value.contains("$(") || value.contains("${") || value.contains('`') {
+        return None;
+    }
+    Some(value.to_string())
+}
 
-/// The subcommands of those that carry one.
-const FORGE_SUBJECTS: &[&str] = &["pr", "issue", "release", "mr"];
+/// One forge invocation shape, and the flags that tool actually accepts.
+///
+/// A table rather than one `--body` for everything, because the three programs
+/// disagree and two of them do not have a `--body` at all: `gh release create`
+/// takes `-n, --notes` and `glab` takes `-d, --description`, both of which
+/// answer `unknown flag` to `--body`. A single flag name reads as coverage of
+/// all three and is coverage of one.
+struct Forge {
+    /// The program, as it appears at the head of a segment.
+    tool:     &'static str,
+    /// The subcommands under it that author a body.
+    subjects: &'static [&'static str],
+    /// The long flag carrying the body.
+    long:     &'static str,
+    /// The short flag carrying the body.
+    short:    &'static str,
+    /// The flag naming a file, which this cannot open, so it declines rather
+    /// than measuring the path.
+    file:     &'static str,
+}
 
-/// Every run of words that is one forge invocation carrying a body.
+/// What is covered, which is what these rows say and nothing wider.
+///
+/// Read off `gh pr create --help`, `gh issue create --help`, `gh release create
+/// --help`, `glab mr create --help` and `glab issue create --help`. A forge or
+/// a subcommand absent from this table is not checked, and the arms below name
+/// each row so removing one fails.
+const FORGES: &[Forge] = &[
+    Forge {
+        tool:     "gh",
+        subjects: &["pr", "issue"],
+        long:     "--body",
+        short:    "-b",
+        file:     "--body-file",
+    },
+    Forge {
+        tool:     "gh",
+        subjects: &["release"],
+        long:     "--notes",
+        short:    "-n",
+        file:     "--notes-file",
+    },
+    Forge {
+        tool:     "glab",
+        subjects: &["mr", "issue"],
+        long:     "--description",
+        short:    "-d",
+        file:     "--description-file",
+    },
+];
+
+/// Every run of words that is one forge invocation carrying a body, with the
+/// row saying which flags that invocation accepts.
 ///
 /// Anchored the same way the message scan is, and for the same reason: an
 /// unrelated `--body` earlier in a command line is not the pull request's.
-fn forge_body_segments(words: &[String]) -> Vec<&[String]> {
+fn forge_body_segments(words: &[String]) -> Vec<(&[String], &'static Forge)> {
     let mut out = Vec::new();
     let mut start = 0usize;
     for i in 0 ..= words.len() {
@@ -86,11 +156,12 @@ fn forge_body_segments(words: &[String]) -> Vec<&[String]> {
         let Some(first) = segment.first() else {
             continue;
         };
-        let is_forge = FORGE_TOOLS
-            .iter()
-            .any(|t| first == t || first.ends_with(&format!("/{t}")));
-        if is_forge && segment.iter().any(|w| FORGE_SUBJECTS.contains(&w.as_str())) {
-            out.push(segment);
+        for forge in FORGES {
+            let is_tool = first == forge.tool || first.ends_with(&format!("/{}", forge.tool));
+            if is_tool && segment.iter().any(|w| forge.subjects.contains(&w.as_str())) {
+                out.push((segment, forge));
+                break;
+            }
         }
     }
     out
@@ -468,9 +539,87 @@ mod tests {
             body_on_the_command_line("gh pr create --body='the body'").as_deref(),
             Some("the body")
         );
+    }
+
+    #[test]
+    fn the_short_flag_is_read_the_way_the_long_one_is() {
+        // `gh pr create --help` documents `-b, --body`, and an agent writing a
+        // command by hand reaches for the short form as often as the long one.
+        // Reading only the long form leaves every check in the lint returning
+        // nothing on a command it was built to read, which is the whole lint
+        // bypassed by a flag the tool advertises.
         assert_eq!(
-            body_on_the_command_line("glab mr create --body 'the body'").as_deref(),
+            body_on_the_command_line("gh pr create -b 'the body'").as_deref(),
             Some("the body")
+        );
+        assert_eq!(
+            body_on_the_command_line("gh issue create -b 'the body'").as_deref(),
+            Some("the body")
+        );
+    }
+
+    #[test]
+    fn each_forge_is_read_by_the_flag_that_forge_accepts() {
+        // One row per entry in `FORGES`, so removing a row fails here. The
+        // three programs disagree and two of them have no `--body` at all:
+        // `gh release create` answers `unknown flag` to it and takes
+        // `-n, --notes`, and `glab` takes `-d, --description`. A single flag
+        // name across all three reads as coverage of three and is coverage of
+        // one.
+        assert_eq!(
+            body_on_the_command_line("gh release create v1 --notes 'the notes'").as_deref(),
+            Some("the notes")
+        );
+        assert_eq!(
+            body_on_the_command_line("gh release create v1 -n 'the notes'").as_deref(),
+            Some("the notes")
+        );
+        assert_eq!(
+            body_on_the_command_line("glab mr create --description 'the body'").as_deref(),
+            Some("the body")
+        );
+        assert_eq!(
+            body_on_the_command_line("glab issue create -d 'the body'").as_deref(),
+            Some("the body")
+        );
+    }
+
+    #[test]
+    fn a_flag_the_tool_does_not_accept_is_not_read_as_a_body() {
+        // The negative half of the row above, and the one the table exists
+        // for. Both of these are what the earlier `--body`-everywhere reader
+        // returned a body for, and neither command runs: the tools answer
+        // `unknown flag`. Answering `Some` here means the lint judges a string
+        // that was never published.
+        assert_eq!(
+            body_on_the_command_line("glab mr create --body 'not a glab flag'"),
+            None
+        );
+        assert_eq!(
+            body_on_the_command_line("gh release create v1 --body 'not a release flag'"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_substitution_the_shell_never_expanded_is_not_measured() {
+        // `--body "$(git log ...)"` reaches a hook as its own text, so
+        // measuring it measures ten characters of shell rather than the body,
+        // and a configured minimum then refuses a release pull request for a
+        // length it never had. That command is the workspace's own.
+        assert_eq!(
+            body_on_the_command_line(
+                "gh pr create --base main --body \"$(git log --format='- %h %s')\""
+            ),
+            None
+        );
+        assert_eq!(
+            body_on_the_command_line("gh pr create --body '`date`'"),
+            None
+        );
+        assert_eq!(
+            body_on_the_command_line("gh pr create --body '${SUMMARY}'"),
+            None
         );
     }
 
@@ -508,6 +657,24 @@ mod tests {
         // check and is not one.
         assert_eq!(
             body_on_the_command_line("gh pr create --body-file /tmp/b.md"),
+            None
+        );
+        assert_eq!(
+            body_on_the_command_line("gh release create v1 --notes-file /tmp/n.md"),
+            None
+        );
+        assert_eq!(
+            body_on_the_command_line("glab mr create --description-file /tmp/d.md"),
+            None
+        );
+        // Both flags at once is the only shape where naming the file flag
+        // changes an answer, since the file forms share no spelling with the
+        // body forms and fall through to nothing on their own. `gh` refuses
+        // such a command outright, so nothing is published and there is
+        // nothing to judge; reading the inline one would judge a string the
+        // tool never accepted.
+        assert_eq!(
+            body_on_the_command_line("gh pr create --body-file /tmp/b.md --body 'inline'"),
             None
         );
     }
