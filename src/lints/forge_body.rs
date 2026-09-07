@@ -40,6 +40,13 @@ impl Lint for ForgeBody {
         LINT_NAME
     }
 
+    /// The body is in the command when an agent hook is the caller, so this
+    /// lint cannot do its job without the invocation. `body_source` says what it
+    /// does with it.
+    fn invocation_wanted(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &'static str {
         "a forge body carries the sections a project requires and none of its forbidden content"
     }
@@ -94,7 +101,10 @@ impl MessageLint for ForgeBody {
 
     fn check_message(&self, ctx: &MessageContext) -> Vec<LintError> {
         let mut out = Vec::new();
-        let lower = ctx.message.to_ascii_lowercase();
+        let Some(body) = body_source(ctx) else {
+            return out;
+        };
+        let lower = body.to_ascii_lowercase();
 
         for section in &self.required_sections {
             if !lower.contains(&section.to_ascii_lowercase()) {
@@ -107,7 +117,7 @@ impl MessageLint for ForgeBody {
         }
 
         if self.min_length > 0 {
-            let len = ctx.message.trim().chars().count();
+            let len = body.trim().chars().count();
             if len < self.min_length {
                 out.push(finding(
                     ctx,
@@ -140,6 +150,26 @@ fn split_list(v: &str) -> Vec<String> {
         .collect()
 }
 
+/// The text that is the body, which is not always `ctx.message`.
+///
+/// The same two callers as the commit lint has, and the same trap. Without an
+/// invocation the text is the body, which is how a forge tool's own hook would
+/// call this. With one, the text is the serialised tool input and the body is on
+/// the command line, so measuring the given text measures the command: a
+/// configured minimum would then be satisfied by a long command carrying an
+/// empty body, and a required section would be found in the command's own words.
+///
+/// `--body-file` names a path this cannot open, so it declines rather than
+/// measuring the path's length, which is the shape that reads as a real check
+/// and is not one.
+fn body_source(ctx: &MessageContext) -> Option<String> {
+    let Some(invocation) = ctx.invocation.as_ref() else {
+        return Some(ctx.message.to_string());
+    };
+    let command = invocation.command.filter(|c| !c.trim().is_empty())?;
+    super::authored_message::body_on_the_command_line(command)
+}
+
 fn finding(ctx: &MessageContext, kind: &'static str, message: &str) -> LintError {
     LintError::with_finding_kind(
         ctx.origin.to_string(),
@@ -170,6 +200,89 @@ mod tests {
             .into_iter()
             .map(|e| e.finding_kind.unwrap_or("none").to_string())
             .collect()
+    }
+
+    /// What an agent's PreToolUse hook hands over: the serialised tool input as
+    /// the text, and the command beside it.
+    fn check_from_a_hook(l: &ForgeBody, command: &str) -> Vec<String> {
+        let serialised = format!(
+            "{{\"command\":\"{}\",\"description\":\"open the pull request\"}}",
+            command.replace('"', "\\\"")
+        );
+        let ctx = MessageContext {
+            domain:     MessageDomain::PullRequestBody,
+            mode:       AgentMode::Assistant,
+            message:    &serialised,
+            origin:     "<stdin>",
+            repo_root:  std::path::Path::new("/tmp"),
+            invocation: Some(mockspace_lint_rules::Invocation {
+                command:   Some(command),
+                tool_name: Some("Bash"),
+            }),
+        };
+        l.check_message(&ctx)
+            .into_iter()
+            .map(|e| e.finding_kind.unwrap_or("none").to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_length_is_the_bodys_and_not_the_commands() {
+        // The defect this fixes. On the hook path the text is the serialised
+        // tool input, so a minimum was satisfied by a long command carrying an
+        // empty body, and a short body inside a long command passed.
+        let l = with(&[("min_length", "40")]);
+        let short = check_from_a_hook(
+            &l,
+            "gh pr create --title 'a perfectly ordinary title here' --body 'too short'",
+        );
+        assert!(
+            short.contains(&"too-short".to_string()),
+            "a nine-character body inside a long command passed: {short:?}"
+        );
+
+        let long = check_from_a_hook(
+            &l,
+            "gh pr create --body 'this body is comfortably longer than the configured minimum of forty'",
+        );
+        assert!(long.is_empty(), "a long body was refused: {long:?}");
+    }
+
+    #[test]
+    fn a_required_section_is_looked_for_in_the_body_and_not_in_the_command() {
+        // The other half, and the one that fails in the permissive direction:
+        // a section name appearing anywhere in the command line satisfied the
+        // check, and a command mentioning it while the body does not is
+        // exactly what a template-filling agent produces.
+        let l = with(&[("required_sections", "Summary")]);
+        let found = check_from_a_hook(
+            &l,
+            "echo Summary && gh pr create --body 'nothing of the kind in here'",
+        );
+        assert!(
+            found.contains(&"missing-section".to_string()),
+            "the section was found in the command rather than the body: {found:?}"
+        );
+    }
+
+    #[test]
+    fn a_body_the_command_does_not_carry_is_judged_by_nothing() {
+        // `--body-file` names a path this cannot open, and measuring the path
+        // would be a check that reads as real and is not.
+        let l = with(&[("min_length", "40")]);
+        assert!(check_from_a_hook(&l, "gh pr create --body-file /tmp/b.md").is_empty());
+        assert!(check_from_a_hook(&l, "gh pr create --title 'x'").is_empty());
+    }
+
+    #[test]
+    fn the_forge_hooks_own_path_is_untouched() {
+        // The control: with no invocation the text is the body, which is how a
+        // forge tool's own hook calls this, and every other arm in this file
+        // goes through it.
+        let l = with(&[("min_length", "40")]);
+        assert!(
+            check(&l, MessageDomain::PullRequestBody, "short").contains(&"too-short".to_string())
+        );
     }
 
     fn with(pairs: &[(&str, &str)]) -> ForgeBody {

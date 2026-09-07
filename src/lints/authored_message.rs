@@ -35,6 +35,67 @@ pub(crate) fn authored_on_the_command_line(command: &str) -> Option<String> {
     Some(parts.join("\n\n"))
 }
 
+/// The body a forge command carries on its command line, if it does.
+///
+/// The same problem as a commit subject one tool over. A forge body reaches a
+/// lint as the serialised tool input, so measuring its length measures the
+/// command line, and a body lint with a configured minimum would refuse a
+/// perfectly ordinary pull request for a length it never had.
+///
+/// `Some("")` is a real answer and a different one from `None`: `--body ''` is a
+/// body that is deliberately empty, which some conventions require, and a lint
+/// that cannot tell it from no body at all cannot check that convention.
+pub(crate) fn body_on_the_command_line(command: &str) -> Option<String> {
+    let words = split_words(command);
+    for segment in forge_body_segments(&words) {
+        let mut i = 0usize;
+        while i < segment.len() {
+            let w = &segment[i];
+            if let Some(rest) = w.strip_prefix("--body=") {
+                return Some(rest.to_string());
+            }
+            if w == "--body" {
+                return segment.get(i + 1).cloned();
+            }
+            i += 1;
+        }
+    }
+    None
+}
+
+/// The forge programs whose subcommands author a body.
+const FORGE_TOOLS: &[&str] = &["gh", "glab"];
+
+/// The subcommands of those that carry one.
+const FORGE_SUBJECTS: &[&str] = &["pr", "issue", "release", "mr"];
+
+/// Every run of words that is one forge invocation carrying a body.
+///
+/// Anchored the same way the message scan is, and for the same reason: an
+/// unrelated `--body` earlier in a command line is not the pull request's.
+fn forge_body_segments(words: &[String]) -> Vec<&[String]> {
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    for i in 0 ..= words.len() {
+        let is_end = i == words.len() || matches!(words[i].as_str(), "&&" | "||" | ";" | "|" | "&");
+        if !is_end {
+            continue;
+        }
+        let segment = &words[start .. i];
+        start = i + 1;
+        let Some(first) = segment.first() else {
+            continue;
+        };
+        let is_forge = FORGE_TOOLS
+            .iter()
+            .any(|t| first == t || first.ends_with(&format!("/{t}")));
+        if is_forge && segment.iter().any(|w| FORGE_SUBJECTS.contains(&w.as_str())) {
+            out.push(segment);
+        }
+    }
+    out
+}
+
 /// The verbs that author a message a person wrote.
 const MESSAGE_VERBS: &[&str] = &["commit", "tag", "notes", "merge", "revert", "cherry-pick", "am"];
 
@@ -395,5 +456,65 @@ mod tests {
             authored_on_the_command_line("git add -A && git commit -m 'fix: a subject'").as_deref(),
             Some("fix: a subject")
         );
+    }
+
+    #[test]
+    fn a_forge_body_comes_out_of_the_command() {
+        assert_eq!(
+            body_on_the_command_line("gh pr create --title 'x' --body 'the body'").as_deref(),
+            Some("the body")
+        );
+        assert_eq!(
+            body_on_the_command_line("gh pr create --body='the body'").as_deref(),
+            Some("the body")
+        );
+        assert_eq!(
+            body_on_the_command_line("glab mr create --body 'the body'").as_deref(),
+            Some("the body")
+        );
+    }
+
+    #[test]
+    fn an_empty_body_is_a_body_and_not_the_absence_of_one() {
+        // `--body ''` is a body somebody chose to leave empty, which is what
+        // the convention here requires on a feature pull request, and a lint
+        // that cannot tell it from no body at all cannot check that.
+        assert_eq!(
+            body_on_the_command_line("gh pr create --body ''").as_deref(),
+            Some("")
+        );
+        assert_eq!(body_on_the_command_line("gh pr create --title 'x'"), None);
+    }
+
+    #[test]
+    fn a_body_flag_belonging_to_something_else_is_not_the_pull_requests() {
+        // The anchoring, same as for a subject. `curl --body` is not a forge
+        // command, and reading its argument as a pull request body would judge
+        // a request payload against a pull request convention.
+        assert_eq!(
+            body_on_the_command_line("curl --body 'payload' https://example.test"),
+            None
+        );
+        assert_eq!(
+            body_on_the_command_line("curl --body 'payload' && gh pr create --body 'real'")
+                .as_deref(),
+            Some("real")
+        );
+    }
+
+    #[test]
+    fn a_body_in_a_file_reads_as_none_rather_than_as_the_path() {
+        // Measuring the length of a path is the shape that reads as a real
+        // check and is not one.
+        assert_eq!(
+            body_on_the_command_line("gh pr create --body-file /tmp/b.md"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_forge_program_with_no_body_carrying_subcommand_authors_nothing() {
+        assert_eq!(body_on_the_command_line("gh repo view --json name"), None);
+        assert_eq!(body_on_the_command_line("gh pr list"), None);
     }
 }
