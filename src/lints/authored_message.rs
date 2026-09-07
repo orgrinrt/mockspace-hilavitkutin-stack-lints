@@ -1185,6 +1185,52 @@ mod tests {
     }
 
     #[test]
+    fn the_commands_this_workspace_actually_writes_are_read_or_declined() {
+        // A spread of real shapes rather than a spread of shapes the extractor
+        // was written against, since the second is what every revision of this
+        // has been tested with and what let three defects through.
+        //
+        // Each of these either yields the body somebody wrote or yields
+        // nothing. What none of them may do is yield a fragment, because a
+        // fragment is what gets measured and refused.
+        for (command, want) in [
+            (
+                "gh pr create --base dev --title 'fix: a thing' --body ''",
+                Some(""),
+            ),
+            (
+                "gh pr create --base main --head dev --title 'release: 0.2.0' \
+                 --body \"$(git log --reverse --format='- `%h` %s' origin/main..origin/dev)\"",
+                None,
+            ),
+            (
+                "git add -A && gh pr create --title 'x' --body 'a real body here' 2>&1 | tail -1",
+                Some("a real body here"),
+            ),
+            (
+                "gh pr create --title 'x' --body 'a real body here' > /tmp/out 2>&1",
+                Some("a real body here"),
+            ),
+            (
+                "cd repo && gh pr create --draft --title 'x' --body 'a real body here'",
+                Some("a real body here"),
+            ),
+            (
+                "gh pr create --title \"it's a fix\" --body 'it'\\''s a body'",
+                Some("it's a body"),
+            ),
+            ("gh pr view 45 --json title --jq .title", None),
+            ("gh pr merge 45 --squash --delete-branch", None),
+        ] {
+            assert_eq!(
+                body_on_the_command_line(command).as_deref(),
+                want,
+                "`{command}`"
+            );
+        }
+    }
+
+    #[test]
     fn the_joined_spelling_takes_the_last_one_too() {
         // The separated form's last-wins is pinned above; this is the other
         // spelling of the same rule.
